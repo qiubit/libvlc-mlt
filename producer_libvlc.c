@@ -8,7 +8,7 @@
 #include <string.h>
 #include <assert.h>
 
-#define MAX_CACHE_SIZE 1000
+#define MAX_CACHE_SIZE 100
 #define SAMPLE_RATE 48000
 #define CHANNELS 2
 #define AUDIO_SAMPLE_SIZE sizeof( int16_t )
@@ -130,7 +130,8 @@ mlt_producer producer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 			// If initialization was successful, we can proceed
 			if ( self->libvlc_instance != NULL )
 			{
-			    libvlc_log_set(self->libvlc_instance, log_cb, NULL);
+			    //libvlc_log_set(self->libvlc_instance, log_cb, NULL);
+
 				// Override virtual function for getting frames
 				producer->get_frame = producer_get_frame;
 
@@ -294,7 +295,7 @@ static void audio_prerender_callback( void* p_audio_data, uint8_t** pp_pcm_buffe
 {
 	producer_libvlc self = p_audio_data;
 	pthread_mutex_lock( &self->a_cache_mutex );
-	uint8_t *buffer = calloc( size, sizeof( uint8_t ) );
+	uint8_t *buffer = mlt_pool_alloc( size * sizeof( uint8_t ) );
 	*pp_pcm_buffer = buffer;
 	self->a_cache_producers++;
 	while ( mlt_deque_count( self->a_cache ) == MAX_CACHE_SIZE )
@@ -324,9 +325,9 @@ static void audio_postrender_callback( void* p_audio_data, uint8_t* p_pcm_buffer
 		size_t new_ta_buffer_size = samples_to_buffer * AUDIO_SAMPLE_SIZE * channels;
 		size_t frame_samples_size = needed_samples * AUDIO_SAMPLE_SIZE * channels;
 		// Allocate buffer for frame samples
-		uint8_t *frame_samples = calloc( frame_samples_size, sizeof( uint8_t ) );
+		uint8_t *frame_samples = mlt_pool_alloc( frame_samples_size * sizeof( uint8_t ) );
 		// And for the new temp audio buffer
-		uint8_t *new_ta_buffer = calloc( new_ta_buffer_size, sizeof( uint8_t ) );
+		uint8_t *new_ta_buffer = mlt_pool_alloc( new_ta_buffer_size * sizeof( uint8_t ) );
 		// Copy frame samples to buffer and initialize new temp buffer
 		if ( buffered_samples < needed_samples ) // We need to use both buffers
 		{
@@ -352,8 +353,8 @@ static void audio_postrender_callback( void* p_audio_data, uint8_t* p_pcm_buffer
 		}
 
 		// We don't need those buffers anymore
-		free( self->ta_buffer );
-		free( p_pcm_buffer );
+		mlt_pool_release( self->ta_buffer );
+		mlt_pool_release( p_pcm_buffer );
 
 		// Move our new temp audio buffer to producer
 		self->ta_buffer = new_ta_buffer;
@@ -382,7 +383,7 @@ static void audio_postrender_callback( void* p_audio_data, uint8_t* p_pcm_buffer
 	{
 		// Make temp audio buffer bigger to get all the samples
 		self->ta_buffer =
-			realloc( self->ta_buffer, self->ta_buffer_size + ( nb_samples * AUDIO_SAMPLE_SIZE * channels ) );
+			mlt_pool_realloc( self->ta_buffer, self->ta_buffer_size + ( nb_samples * AUDIO_SAMPLE_SIZE * channels ) );
 
 		// TODO: What now? Cleanup and terminate?
 		assert( self->ta_buffer != NULL );
@@ -390,7 +391,7 @@ static void audio_postrender_callback( void* p_audio_data, uint8_t* p_pcm_buffer
 		memcpy( self->ta_buffer + self->ta_buffer_size,
 				p_pcm_buffer, ( nb_samples * AUDIO_SAMPLE_SIZE * channels ) );
 		self->ta_buffer_size += ( nb_samples * AUDIO_SAMPLE_SIZE * channels );
-		free( p_pcm_buffer );
+		mlt_pool_release( p_pcm_buffer );
 	}
 	pthread_mutex_unlock( &self->a_cache_mutex );
 }
@@ -403,7 +404,7 @@ static void video_prerender_callback( void *data, uint8_t **p_buffer, size_t siz
 	pthread_mutex_lock( &self->v_cache_mutex );
 
 	// Initialize buffer for data
-	uint8_t *buffer = calloc( size, sizeof( uint8_t ) );
+	uint8_t *buffer = mlt_pool_alloc( size * sizeof( uint8_t ) );
 
 	// Inform all threads we are waiting on cond
 	self->v_cache_producers++;
@@ -494,6 +495,9 @@ static int producer_get_audio( mlt_frame frame, void **buffer, mlt_audio_format 
 
 	free( a_item );
 
+	// Sets audio buffer destructor
+	mlt_frame_set_audio( frame, *buffer, *format, *samples * *channels * AUDIO_SAMPLE_SIZE, mlt_pool_release );
+
 	if ( self->a_cache_producers )
 	{
 		pthread_cond_signal( &self->a_cache_producer_cond );
@@ -504,8 +508,6 @@ static int producer_get_audio( mlt_frame frame, void **buffer, mlt_audio_format 
 
 static int producer_get_image( mlt_frame frame, uint8_t **buffer, mlt_image_format *format, int *width, int *height, int writable )
 {
-	int i;
-
 	// Get the producer
 	producer_libvlc self = mlt_frame_pop_service( frame );
 
@@ -535,6 +537,9 @@ static int producer_get_image( mlt_frame frame, uint8_t **buffer, mlt_image_form
 	*height = v_item->height;
 	*buffer = v_item->buffer;
 	free( v_item );
+
+	// Sets image buffer destructor
+	mlt_frame_set_image( frame, *buffer, *width * *height * 3, mlt_pool_release );
 
 	// Signal waiting producers, if any
 	if ( self->v_cache_producers )
