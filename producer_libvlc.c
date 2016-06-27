@@ -222,8 +222,8 @@ static void collect_stream_data( producer_libvlc self, char *file )
 			mlt_properties_set_int( p, "meta.media.sample_aspect_den", v_track->i_sar_den );
 			self->width = v_track->i_width;
 			self->height = v_track->i_height;
-			self->fps = mlt_properties_get_int( p, "meta.media.frame_rate_num" )
-						/ mlt_properties_get_int( p, "meta.media.frame_rate_den" );
+			self->fps = ( float ) mlt_properties_get_int( p, "meta.media.frame_rate_num" )
+				/ ( float ) mlt_properties_get_int( p, "meta.media.frame_rate_den" );
 			self->sample_rate = 48000;
 			break;
 		}
@@ -244,10 +244,9 @@ static void setup_smem( producer_libvlc self )
 	mlt_properties p = MLT_PRODUCER_PROPERTIES( self->parent );
 
 	// Collect metadata to local variables
-	width = mlt_properties_get_int( p, "meta.media.width" );
-	height = mlt_properties_get_int( p, "meta.media.height" );
-	fps = mlt_properties_get_int( p, "meta.media.frame_rate_num" )
-			/ mlt_properties_get_int( p, "meta.media.frame_rate_den" );
+	width = self->width;
+	height = self->height;
+	fps = self->fps;
 
 	size = snprintf( fps_string, 1000, "%f", fps);
 	for (i = 0; i < size; i++)
