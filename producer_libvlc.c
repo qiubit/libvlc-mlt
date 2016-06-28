@@ -611,6 +611,9 @@ static int producer_get_frame( mlt_producer producer, mlt_frame_ptr frame, int i
 	// Get handle to libVLC's producer
 	producer_libvlc self = producer->child;
 
+	// TODO: Sometimes this line causes segfault when using melt. Is it ours or melt's fault?
+	// I assume in my code that MLT won't call producer_get_frame() after producer_close() but
+	// maybe the assumption isn't correct?
 	mlt_position current_position = mlt_producer_position( self );
 
 	// Access the private data (producer is needed to get profile)
@@ -663,6 +666,14 @@ static void producer_close( mlt_producer parent )
 
 		// Clear ta_buffer
 		mlt_pool_release( self->ta_buffer );
+
+		// Clear mutexes and conds
+		pthread_mutex_destroy( &self->v_cache_mutex );
+		pthread_cond_destroy( &self->v_cache_producer_cond );
+		pthread_cond_destroy( &self->v_cache_consumer_cond );
+		pthread_mutex_destroy( &self->a_cache_mutex );
+		pthread_cond_destroy( &self->a_cache_producer_cond );
+		pthread_cond_destroy( &self->a_cache_consumer_cond );
 
 		// Free allocated memory for libvlc_producer
 		free( self );
