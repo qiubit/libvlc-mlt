@@ -81,6 +81,8 @@ struct producer_libvlc_s
 	// size of ta_buffer
 	size_t ta_buffer_size;
 	mlt_position current_audio_frame;
+	// Flag for cleanup
+	int terminating;
 	// debug
 	int audio_locks;
 	int audio_unlocks;
@@ -93,6 +95,7 @@ static int producer_get_frame( mlt_producer producer, mlt_frame_ptr frame, int i
 static void set_properties( producer_libvlc self, mlt_profile profile );
 static void collect_stream_data( producer_libvlc self, char *file );
 static void setup_smem( producer_libvlc self );
+static void producer_close( mlt_producer parent );
 static void audio_prerender_callback( void* p_audio_data, uint8_t** pp_pcm_buffer, size_t size );
 static void audio_postrender_callback( void* p_audio_data, uint8_t* p_pcm_buffer, unsigned int channels,
 									   unsigned int rate, unsigned int nb_samples, unsigned int bits_per_sample,
@@ -122,6 +125,9 @@ mlt_producer producer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 
 	// Set libVLC's producer parent
 	self->parent = producer;
+
+	// Set destructor
+	producer->close = producer_close;
 
 	// Initialize libVLC
 	self->libvlc_instance = libvlc_new( 0, NULL );
@@ -289,17 +295,43 @@ static void setup_smem( producer_libvlc self )
 
 static void audio_prerender_callback( void* p_audio_data, uint8_t** pp_pcm_buffer, size_t size )
 {
+	// Flag for termination purposes
+	int mutex_locked = 0;
+
 	producer_libvlc self = p_audio_data;
 
+	// If we're terminating, we need to abort render
+	if ( self->terminating )
+		goto terminate;
+
+	// Lock cache mutex
 	pthread_mutex_lock( &self->a_cache_mutex );
-	uint8_t *buffer = mlt_pool_alloc( size * sizeof( uint8_t ) );
-	*pp_pcm_buffer = buffer;
+	mutex_locked = 1;
+
+	// Wait for space in cache
 	self->a_cache_producers++;
 	while ( mlt_deque_count( self->a_cache ) == MAX_CACHE_SIZE )
 	{
 		pthread_cond_wait( &self->a_cache_producer_cond, &self->a_cache_mutex );
+
+		// Terminate function could have woken us up
+		if ( self->terminating )
+			goto terminate;
 	}
 	self->a_cache_producers--;
+
+	// Allocate space for buffer and proceed with rendering
+	uint8_t *buffer = mlt_pool_alloc( size * sizeof( uint8_t ) );
+	*pp_pcm_buffer = buffer;
+
+	return;
+
+terminate:
+	*pp_pcm_buffer = NULL;
+	// If we own the mutex, we need to release it for destruction
+	if ( mutex_locked )
+		pthread_mutex_unlock( &self->a_cache_mutex );
+	return;
 }
 
 static void audio_postrender_callback( void* p_audio_data, uint8_t* p_pcm_buffer, unsigned int channels,
@@ -399,13 +431,18 @@ static void audio_postrender_callback( void* p_audio_data, uint8_t* p_pcm_buffer
 
 static void video_prerender_callback( void *data, uint8_t **p_buffer, size_t size )
 {
+	// Flag for termination purposes
+	int mutex_locked = 0;
+
 	producer_libvlc self = data;
+
+	// If we're terminating, we need to abort render
+	if ( self->terminating )
+		goto terminate;
 
 	// Aquire cache mutex
 	pthread_mutex_lock( &self->v_cache_mutex );
-
-	// Initialize buffer for data
-	uint8_t *buffer = mlt_pool_alloc( size * sizeof( uint8_t ) );
+	mutex_locked = 1;
 
 	// Inform all threads we are waiting on cond
 	self->v_cache_producers++;
@@ -414,13 +451,27 @@ static void video_prerender_callback( void *data, uint8_t **p_buffer, size_t siz
 	while( mlt_deque_count( self->v_cache ) == MAX_CACHE_SIZE )
 	{
 		pthread_cond_wait( &self->v_cache_producer_cond, &self->v_cache_mutex );
+
+		// Terminate function could have woken us up
+		if ( self->terminating )
+			goto terminate;
 	}
 
 	// We're not waiting on cond anymore
 	self->v_cache_producers--;
 
-	// We have space in cache, let libVLC do the rendering
+	// Allocate memory and proceed with rendering
+	uint8_t *buffer = mlt_pool_alloc( size * sizeof( uint8_t ) );
 	*p_buffer = buffer;
+
+	return;
+
+terminate:
+	*p_buffer = NULL;
+	// Release mutex for destruction
+	if ( mutex_locked )
+		pthread_mutex_unlock( &self->v_cache_mutex );
+	return;
 }
 
 static void video_postrender_callback( void *data, uint8_t *buffer, int width, int height,
@@ -580,4 +631,44 @@ static int producer_get_frame( mlt_producer producer, mlt_frame_ptr frame, int i
 	mlt_producer_prepare_next( producer );
 
 	return 0;
+}
+
+static void producer_close( mlt_producer parent )
+{
+	if ( parent != NULL ) {
+		producer_libvlc self = parent->child;
+
+		// Stop smem threads
+		self->terminating = 1;
+		libvlc_media_player_stop( self->media_player );
+
+		// Release libVLC objects
+		libvlc_media_player_release( self->media_player );
+		libvlc_media_release( self->media );
+		libvlc_release( self->libvlc_instance );
+
+		// Clear video cache
+		v_cache_item v_item;
+		while ( v_item = mlt_deque_pop_front( self->v_cache ) ) {
+			mlt_pool_release( v_item->buffer );
+			free( v_item );
+		}
+
+		// Clear audio cache
+		a_cache_item a_item;
+		while ( a_item = mlt_deque_pop_front( self->a_cache ) ) {
+			mlt_pool_release( a_item->buffer );
+			free( a_item );
+		}
+
+		// Clear ta_buffer
+		mlt_pool_release( self->ta_buffer );
+
+		// Free allocated memory for libvlc_producer
+		free( self );
+
+		// Call overriden destructor
+		parent->close = NULL;
+		mlt_producer_close( parent );
+	}
 }
