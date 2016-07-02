@@ -611,10 +611,8 @@ static int producer_get_frame( mlt_producer producer, mlt_frame_ptr frame, int i
 	// Get handle to libVLC's producer
 	producer_libvlc self = producer->child;
 
-	// TODO: Sometimes this line causes segfault when using melt. Is it ours or melt's fault?
-	// I assume in my code that MLT won't call producer_get_frame() after producer_close() but
-	// maybe the assumption isn't correct?
-	mlt_position current_position = mlt_producer_position( self );
+	// Aquire current position
+	mlt_position current_position = mlt_producer_position( producer );
 
 	// Access the private data (producer is needed to get profile)
 	mlt_service service = MLT_PRODUCER_SERVICE( producer );
