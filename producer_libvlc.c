@@ -11,6 +11,7 @@
 
 #define MAX_CACHE_SIZE 100
 #define AUDIO_SAMPLE_SIZE sizeof( int16_t )
+#define NO_PTS_VALUE (-1)
 
 // To the reviewer:
 // Assertions in code will be deleted later,
@@ -83,6 +84,8 @@ struct producer_libvlc_s
 	mlt_position current_audio_frame;
 	// Flag for cleanup
 	int terminating;
+	// Seeking
+	int64_t first_pts;
 	// debug
 	int audio_locks;
 	int audio_unlocks;
@@ -170,6 +173,8 @@ mlt_producer producer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 	self->media_player = libvlc_media_player_new_from_media( self->media );
 	if ( self->media_player == NULL ) goto cleanup;
 	media_player_initialized = 1;
+
+	self->first_pts = NO_PTS_VALUE;
 
 	// TODO: Should this go somewhere else?
 	libvlc_media_player_play( self->media_player );
@@ -481,6 +486,10 @@ static void video_postrender_callback( void *data, uint8_t *buffer, int width, i
 
 	producer_libvlc self = data;
 	mlt_properties properties = MLT_PRODUCER_PROPERTIES( self->parent );
+
+	// Get first pts as a frame of reference
+	if ( self->first_pts == NO_PTS_VALUE )
+		self->first_pts = pts;
 
 	// For some reason width and height returned by smem
 	// seems bogus (when using width * height * bpp / 8 as size
