@@ -7,7 +7,8 @@ include ../../../config.mak
 TARGET = ../libmltlibvlc$(LIBSUF)
 
 OBJS = factory.o \
-	   producer_libvlc.o
+	   producer_libvlc.o \
+	   consumer_libvlc.o
 
 CFLAGS += $(shell pkg-config libvlc --cflags)
 
