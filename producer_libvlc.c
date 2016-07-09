@@ -24,7 +24,7 @@
 
 pthread_mutex_t log_mutex;
 
-void log_cb(void *data, int level, const libvlc_log_t *ctx, const char *fmt, va_list args)
+static void log_cb(void *data, int level, const libvlc_log_t *ctx, const char *fmt, va_list args)
 {
 	pthread_mutex_lock(&log_mutex);
 	printf("VLC LOG: ");
@@ -286,7 +286,6 @@ static void collect_timestamp_data( producer_libvlc self )
 	// 0.5 added for rounding
 	self->average_audio_pts_diff = ( double )self->average_audio_pts_diff / ( FRAMES_FOR_DATA_COLLECTION - 1 ) + 0.5;
 	self->average_video_pts_diff = ( double )self->average_video_pts_diff / ( FRAMES_FOR_DATA_COLLECTION - 1 ) + 0.5;
-	printf("MLT LOG average pts diffs collected\n");
 	printf("MLT LOG average audio diff %" PRId64 "\n", self->average_audio_pts_diff);
 	printf("MLT LOG average video diff %" PRId64 "\n", self->average_video_pts_diff);
 	self->collecting_pts_data = 0;
@@ -468,7 +467,6 @@ static void audio_postrender_callback( void* p_audio_data, uint8_t* p_pcm_buffer
 				&& self->collected_video_pts == FRAMES_FOR_DATA_COLLECTION && self->waiting_for_pts_data )
 			{
 				self->waiting_for_pts_data = 0;
-				printf("MLT LOG Waking up our little fucker from audio thread\n");
 				pthread_cond_signal( &self->pts_data_cond );
 			}
 		}
