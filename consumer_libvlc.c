@@ -6,6 +6,9 @@
 #include <stdlib.h>
 #include <assert.h>
 
+#define VIDEO_COOKIE 0
+#define AUDIO_COOKIE 1
+
 // Debug code
 
 pthread_mutex_t log_mutex;
@@ -33,16 +36,23 @@ static void setup_vlc( consumer_libvlc self );
 static int imem_get( void *data, const char* cookie, int64_t *dts, int64_t *pts,
 					 unsigned *flags, size_t *bufferSize, const void **buffer );
 static void imem_release( void *data, const char* cookie, size_t buffSize, void *buffer );
+static int consumer_start( mlt_consumer parent );
+static int consumer_stop( mlt_consumer parent );
+static int consumer_is_stopped( mlt_consumer parent );
+static void consumer_close( mlt_consumer parent );
 
 mlt_consumer consumer_libvlc_init( mlt_profile profile, mlt_service_type type, const char *id, char *arg )
 {
+	int err;
 	mlt_consumer parent = NULL;
 	consumer_libvlc self = NULL;
 
 	// Allocate the consumer data structures
-	parent = mlt_consumer_new( profile );
+	parent = calloc( 1, sizeof( struct mlt_consumer_s ) );
 	self = calloc( 1, sizeof( struct consumer_libvlc_s ) );
 	assert( parent != NULL && self != NULL );
+	err = mlt_consumer_init( parent, self, profile );
+	assert( err == 0 );
 
 	mlt_properties properties = MLT_CONSUMER_PROPERTIES( parent );
 	mlt_properties_set_lcnumeric( properties, "C" );
@@ -50,13 +60,21 @@ mlt_consumer consumer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 	self->parent = parent;
 
 	self->vlc = libvlc_new( 0, NULL );
+	assert( self->vlc != NULL );
 
+	// Debug code
 	libvlc_log_set( self->vlc, log_cb, NULL );
 	pthread_mutex_init( &log_mutex, NULL );
 
 	setup_vlc( self );
 	self->media_player = libvlc_media_player_new_from_media( self->media );
-	libvlc_media_player_play( self->media_player );
+	assert( self->media_player != NULL );
+
+	parent->start = consumer_start;
+	parent->stop = consumer_stop;
+	parent->is_stopped = consumer_is_stopped;
+	parent->close = consumer_close;
+
 	return parent;
 }
 
@@ -136,4 +154,64 @@ static int imem_get( void *data, const char* cookie, int64_t *dts, int64_t *pts,
 static void imem_release( void *data, const char* cookie, size_t buffSize, void *buffer )
 {
 	printf( "imem_releasing\n" );
+}
+
+static int consumer_start( mlt_consumer parent )
+{
+	consumer_libvlc self = parent->child;
+	assert( self != NULL );
+
+	if ( self->media_player && consumer_is_stopped( parent ) )
+	{
+		return libvlc_media_player_play( self->media_player );
+	}
+	return 1;
+}
+
+static int consumer_stop( mlt_consumer parent )
+{
+	consumer_libvlc self = parent->child;
+	assert( self != NULL );
+
+	if ( self->media_player )
+	{
+		libvlc_media_player_stop( self->media_player );
+	}
+
+	return 0;
+}
+
+static int consumer_is_stopped( mlt_consumer parent )
+{
+	consumer_libvlc self = parent->child;
+	assert( self != NULL );
+
+	if ( self->media_player )
+	{
+		return !libvlc_media_player_is_playing( self->media_player );
+	}
+
+	return 1;
+}
+
+static void consumer_close( mlt_consumer parent )
+{
+	if ( parent == NULL )
+	{
+		return;
+	}
+
+	consumer_libvlc self = parent->child;
+
+	if ( self != NULL )
+	{
+		consumer_stop( parent );
+		libvlc_media_player_release( self->media_player );
+		libvlc_media_release( self->media );
+		libvlc_release( self->vlc );
+		free( self );
+	}
+
+	parent->close = NULL;
+	mlt_consumer_close( parent );
 }
