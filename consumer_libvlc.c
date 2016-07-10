@@ -70,7 +70,11 @@ static void setup_vlc( consumer_libvlc self )
 	char video_string[ 512 ];
 	char audio_string[ 512 ];
 	char output_string[ 512 ];
-	char imem_conf[ 512 ];
+	// TODO: For some reason I need to add these options with 3 separate libvlc_media_add_option() calls.
+	// Is there any way around that?
+	char imem_get_conf[ 512 ];
+	char imem_release_conf[ 512 ];
+	char imem_data_conf[ 512 ];
 
 	// We will create media using imem MRL
 	sprintf( video_string, "imem://width=%i:height=%i:dar=%s:fps=%s/1:cookie=0:codec=%s:cat=2:caching=0",
@@ -100,17 +104,23 @@ static void setup_vlc( consumer_libvlc self )
 		mlt_properties_get( properties, "target" ) );
 
 	// This configures imem callbacks
-	sprintf( imem_conf,
-		":imem-get=%" PRIdPTR
-		":imem-release=%" PRIdPTR
+	sprintf( imem_get_conf,
+		":imem-get=%" PRIdPTR,
+		(intptr_t)(void*)&imem_get );
+
+	sprintf( imem_release_conf,
+		":imem-release=%" PRIdPTR,
+		(intptr_t)(void*)&imem_release );
+
+	sprintf( imem_data_conf,
 		":imem-data=%" PRIdPTR,
-		(intptr_t)(void*)&imem_get,
-		(intptr_t)(void*)&imem_release,
 		(intptr_t)(void*)self );
 
 	self->media = libvlc_media_new_location( self->vlc, video_string );
 	assert( self->media != NULL );
-	libvlc_media_add_option( self->media, imem_conf );
+	libvlc_media_add_option( self->media, imem_get_conf );
+	libvlc_media_add_option( self->media, imem_release_conf );
+	libvlc_media_add_option( self->media, imem_data_conf );
 	libvlc_media_add_option( self->media, audio_string );
 	libvlc_media_add_option( self->media, output_string );
 }
