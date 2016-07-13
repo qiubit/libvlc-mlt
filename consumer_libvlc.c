@@ -30,16 +30,28 @@ struct consumer_libvlc_s
 	libvlc_instance_t *vlc;
 	libvlc_media_t *media;
 	libvlc_media_player_t *media_player;
+	libvlc_event_manager_t *mp_manager;
+	int64_t latest_video_pts;
+	int64_t latest_audio_pts;
+	mlt_deque frame_queue;
+	pthread_mutex_t queue_mutex;
+	mlt_position video_position;
+	mlt_position audio_position;
+	void *video_imem_data;
+	void *audio_imem_data;
+	int running;
 };
 
 static void setup_vlc( consumer_libvlc self );
 static int imem_get( void *data, const char* cookie, int64_t *dts, int64_t *pts,
-					 unsigned *flags, size_t *bufferSize, const void **buffer );
+					 unsigned *flags, size_t *bufferSize, void **buffer );
 static void imem_release( void *data, const char* cookie, size_t buffSize, void *buffer );
 static int consumer_start( mlt_consumer parent );
 static int consumer_stop( mlt_consumer parent );
 static int consumer_is_stopped( mlt_consumer parent );
 static void consumer_close( mlt_consumer parent );
+static void consumer_purge( mlt_consumer parent );
+// static void mp_callback( const struct libvlc_event_t *evt, void *data );
 
 mlt_consumer consumer_libvlc_init( mlt_profile profile, mlt_service_type type, const char *id, char *arg )
 {
@@ -69,11 +81,20 @@ mlt_consumer consumer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 	setup_vlc( self );
 	self->media_player = libvlc_media_player_new_from_media( self->media );
 	assert( self->media_player != NULL );
+	self->mp_manager = libvlc_media_player_event_manager( self->media_player );
+	assert( self->mp_manager != NULL );
+	// libvlc_event_attach( self->mp_manager, libvlc_MediaPlayerStopped, &mp_callback, self );
+
+	self->frame_queue = mlt_deque_init( );
+	assert( self->frame_queue != NULL );
+
+	pthread_mutex_init( &self->queue_mutex, NULL );
 
 	parent->start = consumer_start;
 	parent->stop = consumer_stop;
 	parent->is_stopped = consumer_is_stopped;
 	parent->close = consumer_close;
+	parent->purge = consumer_purge;
 
 	return parent;
 }
@@ -103,7 +124,8 @@ static void setup_vlc( consumer_libvlc self )
 		vcodec );
 
 	// Audio stream will be added as input slave
-	sprintf( audio_string, ":input-slave=imem://cookie=1:cat=1:codec=s16l:samplerate=%d:channels=%d:caching=0",
+	sprintf( audio_string, ":input-slave=imem://cookie=1:cat=1:codec=%s:samplerate=%d:channels=%d:caching=0",
+		acodec,
 		mlt_properties_get_int( properties, "frequency" ),
 		mlt_properties_get_int( properties, "channels" ) );
 
@@ -144,26 +166,137 @@ static void setup_vlc( consumer_libvlc self )
 }
 
 static int imem_get( void *data, const char* cookie, int64_t *dts, int64_t *pts,
-					 uint32_t *flags, size_t *bufferSize, const void **buffer )
+					 uint32_t *flags, size_t *bufferSize, void **buffer )
 {
-	printf( "imem_getting\n" );
+	consumer_libvlc self = data;
+	mlt_properties properties = MLT_CONSUMER_PROPERTIES( self->parent );
+	mlt_frame frame = NULL;
+	// Whether or not fetched frame need releasing
+	int cleanup_frame = 0;
 	*buffer = NULL;
+
+	int cookie_int = cookie[ 0 ] - '0';
+
+	// Get data if needed
+	pthread_mutex_lock( &self->queue_mutex );
+
+	frame = mlt_deque_pop_front( self->frame_queue );
+
+	// If we got frame from queue, we need to release it later
+	if ( frame != NULL )
+		cleanup_frame = 1;
+	else
+		frame = mlt_consumer_get_frame( self->parent );
+
+	if ( cookie_int == AUDIO_COOKIE && self->running )
+	{
+		// This is used to pass frames to imem_release() if they need cleanup
+		self->audio_imem_data = NULL;
+
+		mlt_audio_format afmt = mlt_audio_s16;
+		double fps = mlt_properties_get_double( properties, "fps" );
+		int frequency = mlt_properties_get_int( properties, "frequency" );
+		int channels = mlt_properties_get_int( properties, "channels" );
+		int samples = mlt_sample_calculator( fps, frequency, self->audio_position++ );
+		double pts_diff = ( double )samples / ( double )frequency * 1000000.0;
+
+		mlt_frame_get_audio( frame, buffer, &afmt, &frequency, &channels, &samples );
+		*bufferSize = samples * sizeof( int16_t ) * channels;
+
+		*pts = self->latest_audio_pts + pts_diff + 0.5;
+		*dts = *pts;
+
+		self->latest_audio_pts = *pts;
+
+		if ( cleanup_frame )
+			self->audio_imem_data = frame;
+		else
+			mlt_deque_push_back( self->frame_queue, frame );
+	}
+	else if ( cookie_int == VIDEO_COOKIE && self->running )
+	{
+		self->video_imem_data = NULL;
+
+		double fps = mlt_properties_get_double( properties, "fps" );
+		double pts_diff = 1.0 / fps * 1000000.0;
+
+		mlt_image_format vfmt = mlt_image_rgb24a;
+		int width = mlt_properties_get_int( properties, "width" );
+		int height = mlt_properties_get_int( properties, "height" );
+		mlt_frame_get_image( frame, ( uint8_t ** )buffer, &vfmt, &width, &height, 0 );
+		*bufferSize = mlt_image_format_size( vfmt, width, height, NULL );
+
+		*pts = self->latest_video_pts + pts_diff;
+		*dts = *pts;
+
+		self->latest_video_pts = *pts;
+
+		if ( cleanup_frame )
+			self->video_imem_data = frame;
+		else
+			mlt_deque_push_back( self->frame_queue, frame );
+	}
+	else if ( self->running )
+	{
+		// Invalid cookie
+		assert( 0 );
+	}
+	assert( frame != NULL );
+	if ( *buffer == NULL )
+		return 1;
+
+	pthread_mutex_unlock( &self->queue_mutex );
+
 	return 0;
 }
 
 static void imem_release( void *data, const char* cookie, size_t buffSize, void *buffer )
 {
-	printf( "imem_releasing\n" );
+	consumer_libvlc self = data;
+
+	int cookie_int = cookie[ 0 ] - '0';
+
+	if ( cookie_int == VIDEO_COOKIE && self->running )
+	{
+		if ( self->video_imem_data )
+		{
+			mlt_properties properties = MLT_CONSUMER_PROPERTIES( self->parent );
+			mlt_frame frame = self->video_imem_data;
+			mlt_events_fire( properties, "consumer-frame-show", frame, NULL );
+			self->video_imem_data = NULL;
+		}
+	}
+	else if ( cookie_int == AUDIO_COOKIE && self->running )
+	{
+		if ( self->audio_imem_data )
+		{
+			mlt_properties properties = MLT_CONSUMER_PROPERTIES( self->parent );
+			mlt_frame frame = self->audio_imem_data;
+			mlt_events_fire( properties, "consumer-frame-show", frame, NULL );
+			self->audio_imem_data = NULL;
+
+		}
+	}
+	else if ( self->running )
+	{
+		// Invalid cookie
+		assert( 0 );
+	}
 }
 
 static int consumer_start( mlt_consumer parent )
 {
+	int err;
+
 	consumer_libvlc self = parent->child;
 	assert( self != NULL );
 
 	if ( self->media_player && consumer_is_stopped( parent ) )
 	{
-		return libvlc_media_player_play( self->media_player );
+		err = libvlc_media_player_play( self->media_player );
+		if ( !err )
+			self->running = 1;
+		return err;
 	}
 	return 1;
 }
@@ -175,6 +308,7 @@ static int consumer_stop( mlt_consumer parent )
 
 	if ( self->media_player )
 	{
+		self->running = 0;
 		libvlc_media_player_stop( self->media_player );
 	}
 
@@ -188,10 +322,15 @@ static int consumer_is_stopped( mlt_consumer parent )
 
 	if ( self->media_player )
 	{
-		return !libvlc_media_player_is_playing( self->media_player );
+		return !self->running;
 	}
 
 	return 1;
+}
+
+static void consumer_purge( mlt_consumer parent )
+{
+	// We do nothing here, we purge on stop()
 }
 
 static void consumer_close( mlt_consumer parent )
@@ -209,6 +348,7 @@ static void consumer_close( mlt_consumer parent )
 		libvlc_media_player_release( self->media_player );
 		libvlc_media_release( self->media );
 		libvlc_release( self->vlc );
+		pthread_mutex_destroy( &self->queue_mutex );
 		free( self );
 	}
 
