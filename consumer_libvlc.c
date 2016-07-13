@@ -103,7 +103,7 @@ mlt_consumer consumer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 static void setup_vlc( consumer_libvlc self )
 {
 	mlt_properties properties = MLT_CONSUMER_PROPERTIES( self->parent );
-	const char vcodec[] = "RV32";
+	const char vcodec[] = "RGBA";
 	const char acodec[] = "s16l";
 
 	char video_string[ 512 ];
