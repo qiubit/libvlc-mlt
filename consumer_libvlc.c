@@ -342,6 +342,10 @@ static int consumer_stop( mlt_consumer parent )
 		libvlc_media_player_stop( self->media_player );
 	}
 
+	// Reset pts counters
+	self->latest_video_pts = 0;
+	self->latest_audio_pts = 0;
+
 	return 0;
 }
 
