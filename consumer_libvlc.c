@@ -9,6 +9,8 @@
 #define VIDEO_COOKIE 0
 #define AUDIO_COOKIE 1
 
+#define INITIAL_POSITION -1
+
 // Debug code
 
 pthread_mutex_t log_mutex;
@@ -51,7 +53,7 @@ static int consumer_stop( mlt_consumer parent );
 static int consumer_is_stopped( mlt_consumer parent );
 static void consumer_close( mlt_consumer parent );
 static void consumer_purge( mlt_consumer parent );
-// static void mp_callback( const struct libvlc_event_t *evt, void *data );
+static void mp_callback( const struct libvlc_event_t *evt, void *data );
 
 mlt_consumer consumer_libvlc_init( mlt_profile profile, mlt_service_type type, const char *id, char *arg )
 {
@@ -198,62 +200,92 @@ static int imem_get( void *data, const char* cookie, int64_t *dts, int64_t *pts,
 
 	if ( cookie_int == AUDIO_COOKIE && self->running )
 	{
-		// This is used to pass frames to imem_release() if they need cleanup
-		self->audio_imem_data = NULL;
+		assert( frame != NULL );
+		mlt_position current_position = mlt_frame_original_position( frame );
 
-		mlt_audio_format afmt = mlt_audio_s16;
-		double fps = mlt_properties_get_double( properties, "fps" );
-		int frequency = mlt_properties_get_int( properties, "frequency" );
-		int channels = mlt_properties_get_int( properties, "channels" );
-		int samples = mlt_sample_calculator( fps, frequency, self->audio_position++ );
-		double pts_diff = ( double )samples / ( double )frequency * 1000000.0;
-
-		mlt_frame_get_audio( frame, buffer, &afmt, &frequency, &channels, &samples );
-		*bufferSize = samples * sizeof( int16_t ) * channels;
-
-		*pts = self->latest_audio_pts + pts_diff + 0.5;
-		*dts = *pts;
-
-		self->latest_audio_pts = *pts;
-
-		if ( cleanup_frame )
-			self->audio_imem_data = frame;
+		// We terminate imem if we got repeated frame, as this means pause
+		if ( current_position == self->audio_position )
+		{
+			self->running = 0;
+			pthread_mutex_unlock( &self->queue_mutex );
+			return 1;
+		}
 		else
-			mlt_deque_push_back( self->frame_queue, frame );
+		{
+			// Update position
+			self->audio_position = current_position;
+
+			// This is used to pass frames to imem_release() if they need cleanup
+			self->audio_imem_data = NULL;
+
+			mlt_audio_format afmt = mlt_audio_s16;
+			double fps = mlt_properties_get_double( properties, "fps" );
+			int frequency = mlt_properties_get_int( properties, "frequency" );
+			int channels = mlt_properties_get_int( properties, "channels" );
+			int samples = mlt_sample_calculator( fps, frequency, self->audio_position );
+			double pts_diff = ( double )samples / ( double )frequency * 1000000.0;
+
+			mlt_frame_get_audio( frame, buffer, &afmt, &frequency, &channels, &samples );
+			*bufferSize = samples * sizeof( int16_t ) * channels;
+
+			*pts = self->latest_audio_pts + pts_diff + 0.5;
+			*dts = *pts;
+
+			self->latest_audio_pts = *pts;
+
+			if ( cleanup_frame )
+				self->audio_imem_data = frame;
+			else
+				mlt_deque_push_back( self->frame_queue, frame );
+		}
 	}
 	else if ( cookie_int == VIDEO_COOKIE && self->running )
 	{
-		self->video_imem_data = NULL;
+		assert( frame != NULL );
+		mlt_position current_position = mlt_frame_original_position( frame );
 
-		double fps = mlt_properties_get_double( properties, "fps" );
-		double pts_diff = 1.0 / fps * 1000000.0;
-
-		mlt_image_format vfmt = mlt_image_rgb24a;
-		int width = mlt_properties_get_int( properties, "width" );
-		int height = mlt_properties_get_int( properties, "height" );
-		mlt_frame_get_image( frame, ( uint8_t ** )buffer, &vfmt, &width, &height, 0 );
-		*bufferSize = mlt_image_format_size( vfmt, width, height, NULL );
-
-		*pts = self->latest_video_pts + pts_diff;
-		*dts = *pts;
-
-		self->latest_video_pts = *pts;
-
-		if ( cleanup_frame )
-			self->video_imem_data = frame;
+		if ( current_position == self->video_position )
+		{
+			self->running = 0;
+			pthread_mutex_unlock( &self->queue_mutex );
+			return 1;
+		}
 		else
-			mlt_deque_push_back( self->frame_queue, frame );
+		{
+			self->video_position = current_position;
+
+			self->video_imem_data = NULL;
+
+			double fps = mlt_properties_get_double( properties, "fps" );
+			double pts_diff = 1.0 / fps * 1000000.0;
+
+			mlt_image_format vfmt = mlt_image_rgb24a;
+			int width = mlt_properties_get_int( properties, "width" );
+			int height = mlt_properties_get_int( properties, "height" );
+			mlt_frame_get_image( frame, ( uint8_t ** )buffer, &vfmt, &width, &height, 0 );
+			*bufferSize = mlt_image_format_size( vfmt, width, height, NULL );
+
+			*pts = self->latest_video_pts + pts_diff;
+			*dts = *pts;
+
+			self->latest_video_pts = *pts;
+
+			if ( cleanup_frame )
+				self->video_imem_data = frame;
+			else
+				mlt_deque_push_back( self->frame_queue, frame );
+			}
 	}
 	else if ( self->running )
 	{
 		// Invalid cookie
 		assert( 0 );
 	}
+	pthread_mutex_unlock( &self->queue_mutex );
+
 	assert( frame != NULL );
 	if ( *buffer == NULL )
 		return 1;
-
-	pthread_mutex_unlock( &self->queue_mutex );
 
 	return 0;
 }
@@ -292,6 +324,22 @@ static void imem_release( void *data, const char* cookie, size_t buffSize, void 
 	}
 }
 
+static void mp_callback( const struct libvlc_event_t *evt, void *data )
+{
+	consumer_libvlc self = data;
+	assert( self != NULL );
+
+	switch ( evt->type )
+	{
+		case libvlc_MediaPlayerStopped:
+			self->running = 0;
+			break;
+
+		default:
+			assert( 0 );
+	}
+}
+
 static int consumer_start( mlt_consumer parent )
 {
 	int err;
@@ -317,6 +365,13 @@ static int consumer_start( mlt_consumer parent )
 		setup_vlc( self );
 		self->media_player = libvlc_media_player_new_from_media( self->media );
 		assert( self->media_player != NULL );
+		self->mp_manager = libvlc_media_player_event_manager( self->media_player );
+		assert( self->mp_manager != NULL );
+		libvlc_event_attach( self->mp_manager, libvlc_MediaPlayerStopped, &mp_callback, self );
+
+		// Reset play heads
+		self->video_position = INITIAL_POSITION;
+		self->audio_position = INITIAL_POSITION;
 
 		// Run media player
 		self->running = 1;
