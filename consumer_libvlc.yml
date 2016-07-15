@@ -1,0 +1,70 @@
+schema_version: 0.1
+type: consumer
+identifier: libvlc
+title: libVLC
+version: 1
+creator: Pawel Golinski
+license: LGPL
+language: en
+tags:
+  - Audio
+  - Video
+description: >
+  libVLC video and audio output module. It uses VLC "standard" module.
+  It can be set up using usual MLT consumer properties and additional
+  libVLC specific properties described here.
+parameters:
+  - identifier: output_dst
+    argument: yes
+    title: File/URL
+    type: string
+    description: "sout-standard-dst" option
+    required: yes
+
+  - identifier: input_vcodec
+    title: Input vcodec
+    type: string
+    description: Format, in which raw video frames will be supplied to the consumer.
+    default: RGBA
+
+  - identifier: input_acodec
+    title: Input acodec
+    type: string
+    description: Format, in which raw audio frames will be supplied to the consumer.
+    default: s16l
+
+  - identifier: output_vcodec
+    title: Output vcodec.
+    type: string
+    description: "sout-transcode-vcodec" option
+    default: mp2v
+
+  - identifier: output_acodec
+    title: Output acodec.
+    type: string
+    description: "sout-transcode-acodec" option
+    default: mpga
+
+  - identifier: output_vb
+    title: Output video bitrate.
+    type: integer
+    description: "sout-transcode-vb" option
+    default: 8000000
+
+  - identifier: output_ab
+    title: Output audio bitrate.
+    type: integer
+    description: "sout-transcode-ab" option
+    default: 128000
+
+  - identifier: output_mux
+    title: Output muxer.
+    type: string
+    description: "sout-standard-mux" option
+    default: ps
+
+  - identifier: output_access
+    title: Output method.
+    type: string
+    description: "sout-standard-access" option
+    default: file
