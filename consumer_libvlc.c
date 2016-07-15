@@ -68,8 +68,18 @@ mlt_consumer consumer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 
 	mlt_properties properties = MLT_CONSUMER_PROPERTIES( parent );
 	mlt_properties_set_lcnumeric( properties, "C" );
-	mlt_properties_set( properties, "target", arg );
 	self->parent = parent;
+
+	// Set default libVLC specific properties
+	mlt_properties_set( properties, "input_vcodec", "RGBA" );
+	mlt_properties_set( properties, "input_acodec", "s16l" );
+	mlt_properties_set( properties, "output_vcodec", "mp2v" );
+	mlt_properties_set( properties, "output_acodec", "mpga" );
+	mlt_properties_set_int( properties, "output_vb", 8000000 );
+	mlt_properties_set_int( properties, "output_ab", 128000 );
+	mlt_properties_set( properties, "output_dst", arg );
+	mlt_properties_set( properties, "output_mux", "ps" );
+	mlt_properties_set( properties, "output_access", "file" );
 
 	self->vlc = libvlc_new( 0, NULL );
 	assert( self->vlc != NULL );
@@ -77,13 +87,6 @@ mlt_consumer consumer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 	// Debug code
 	libvlc_log_set( self->vlc, log_cb, NULL );
 	pthread_mutex_init( &log_mutex, NULL );
-
-	setup_vlc( self );
-	self->media_player = libvlc_media_player_new_from_media( self->media );
-	assert( self->media_player != NULL );
-	self->mp_manager = libvlc_media_player_event_manager( self->media_player );
-	assert( self->mp_manager != NULL );
-	// libvlc_event_attach( self->mp_manager, libvlc_MediaPlayerStopped, &mp_callback, self );
 
 	self->frame_queue = mlt_deque_init( );
 	assert( self->frame_queue != NULL );
@@ -99,7 +102,8 @@ mlt_consumer consumer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 	return parent;
 }
 
-// Sets up input and output options in VLC
+// Sets up input and output options in VLC,
+// initializes media with those options
 static void setup_vlc( consumer_libvlc self )
 {
 	mlt_properties properties = MLT_CONSUMER_PROPERTIES( self->parent );
@@ -131,17 +135,21 @@ static void setup_vlc( consumer_libvlc self )
 
 	// This configures file output
 	sprintf( output_string, ":sout=#transcode{"
-		"vcodec=%s,fps=%s,width=%d,height=%d,"
-		"acodec=%s,channels=%d,samplerate=%d}"
-		":standard{access=file,mux=ps,dst=\"%s\"}",
-		"mp2v",
+		"vcodec=%s,fps=%s,width=%d,height=%d,vb=%d,"
+		"acodec=%s,channels=%d,samplerate=%d,ab=%d}"
+		":standard{access=%s,mux=%s,dst=\"%s\"}",
+		mlt_properties_get( properties, "output_vcodec" ),
 		mlt_properties_get( properties, "fps" ),
 		mlt_properties_get_int( properties, "width" ),
 		mlt_properties_get_int( properties, "height" ),
-		"mpga",
+		mlt_properties_get_int( properties, "output_vb" ),
+		mlt_properties_get( properties, "output_acodec" ),
 		mlt_properties_get_int( properties, "channels" ),
 		mlt_properties_get_int( properties, "frequency" ),
-		mlt_properties_get( properties, "target" ) );
+		mlt_properties_get_int( properties, "output_ab" ),
+		mlt_properties_get( properties, "output_access" ),
+		mlt_properties_get( properties, "output_mux" ),
+		mlt_properties_get( properties, "output_dst" ) );
 
 	// This configures imem callbacks
 	sprintf( imem_get_conf,
@@ -291,11 +299,33 @@ static int consumer_start( mlt_consumer parent )
 	consumer_libvlc self = parent->child;
 	assert( self != NULL );
 
-	if ( self->media_player && consumer_is_stopped( parent ) )
+	if ( consumer_is_stopped( parent ) )
 	{
+		// Free all previous resources
+		if ( self->media_player )
+		{
+			libvlc_media_player_release( self->media_player );
+			self->media_player = NULL;
+		}
+		if ( self->media )
+		{
+			libvlc_media_release( self->media );
+			self->media = NULL;
+		}
+
+		// Apply properties to new media
+		setup_vlc( self );
+		self->media_player = libvlc_media_player_new_from_media( self->media );
+		assert( self->media_player != NULL );
+
+		// Run media player
+		self->running = 1;
 		err = libvlc_media_player_play( self->media_player );
-		if ( !err )
-			self->running = 1;
+
+		// If we failed to play, we're not running
+		if ( err )
+			self->running = 0;
+
 		return err;
 	}
 	return 1;
@@ -345,9 +375,16 @@ static void consumer_close( mlt_consumer parent )
 	if ( self != NULL )
 	{
 		consumer_stop( parent );
-		libvlc_media_player_release( self->media_player );
-		libvlc_media_release( self->media );
-		libvlc_release( self->vlc );
+
+		if ( self->media_player )
+			libvlc_media_player_release( self->media_player );
+
+		if ( self->media )
+			libvlc_media_release( self->media );
+
+		if ( self->vlc )
+			libvlc_release( self->vlc );
+
 		pthread_mutex_destroy( &self->queue_mutex );
 		free( self );
 	}
