@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <string.h>
 
 #define VIDEO_COOKIE 0
 #define AUDIO_COOKIE 1
@@ -42,9 +43,12 @@ struct consumer_libvlc_s
 	void *video_imem_data;
 	void *audio_imem_data;
 	int running;
+	int output_to_window;
 };
 
 static void setup_vlc( consumer_libvlc self );
+static void setup_vlc_sout( consumer_libvlc self );
+static int setup_vlc_window( consumer_libvlc self );
 static int imem_get( void *data, const char* cookie, int64_t *dts, int64_t *pts,
 					 unsigned *flags, size_t *bufferSize, void **buffer );
 static void imem_release( void *data, const char* cookie, size_t buffSize, void *buffer );
@@ -55,7 +59,7 @@ static void consumer_close( mlt_consumer parent );
 static void consumer_purge( mlt_consumer parent );
 static void mp_callback( const struct libvlc_event_t *evt, void *data );
 
-mlt_consumer consumer_libvlc_init( mlt_profile profile, mlt_service_type type, const char *id, char *arg )
+mlt_consumer consumer_libvlc_init( mlt_profile profile, mlt_service_type type, const char *id, void *arg )
 {
 	int err;
 	mlt_consumer parent = NULL;
@@ -79,7 +83,10 @@ mlt_consumer consumer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 	mlt_properties_set( properties, "output_acodec", "mpga" );
 	mlt_properties_set_int( properties, "output_vb", 8000000 );
 	mlt_properties_set_int( properties, "output_ab", 128000 );
-	mlt_properties_set( properties, "output_dst", arg );
+	if ( self->output_to_window )
+		mlt_properties_set_data( properties, "output_dst", arg, 0, NULL, NULL );
+	else
+		mlt_properties_set( properties, "output_dst", ( char* )arg );
 	mlt_properties_set( properties, "output_mux", "ps" );
 	mlt_properties_set( properties, "output_access", "file" );
 
@@ -101,42 +108,80 @@ mlt_consumer consumer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 	parent->close = consumer_close;
 	parent->purge = consumer_purge;
 
+	// Set output_to_window flag if needed
+	if ( !strcmp( id, "libvlc_window" ) )
+		self->output_to_window = 1;
+
 	return parent;
 }
 
-// Sets up input and output options in VLC,
-// initializes media with those options
 static void setup_vlc( consumer_libvlc self )
 {
 	mlt_properties properties = MLT_CONSUMER_PROPERTIES( self->parent );
-	const char vcodec[] = "RGBA";
-	const char acodec[] = "s16l";
 
-	char video_string[ 512 ];
-	char audio_string[ 512 ];
-	char output_string[ 512 ];
-	// TODO: For some reason I need to add these options with 3 separate libvlc_media_add_option() calls.
-	// Is there any way around that?
+	// imem setup phase
+
+	// Allocate buffers
+	char imem_video_conf[ 512 ];
+	char imem_audio_conf[ 512 ];
 	char imem_get_conf[ 512 ];
 	char imem_release_conf[ 512 ];
 	char imem_data_conf[ 512 ];
 
 	// We will create media using imem MRL
-	sprintf( video_string, "imem://width=%i:height=%i:dar=%s:fps=%s/1:cookie=0:codec=%s:cat=2:caching=0",
+	sprintf( imem_video_conf, "imem://width=%i:height=%i:dar=%s:fps=%s/1:cookie=0:codec=%s:cat=2:caching=0",
 		mlt_properties_get_int( properties, "width" ),
 		mlt_properties_get_int( properties, "height" ),
 		mlt_properties_get( properties, "display_ratio" ),
 		mlt_properties_get( properties, "fps" ),
-		vcodec );
+		mlt_properties_get( properties, "input_vcodec" ) );
 
 	// Audio stream will be added as input slave
-	sprintf( audio_string, ":input-slave=imem://cookie=1:cat=1:codec=%s:samplerate=%d:channels=%d:caching=0",
-		acodec,
+	sprintf( imem_audio_conf, ":input-slave=imem://cookie=1:cat=1:codec=%s:samplerate=%d:channels=%d:caching=0",
+		mlt_properties_get( properties, "input_acodec" ),
 		mlt_properties_get_int( properties, "frequency" ),
 		mlt_properties_get_int( properties, "channels" ) );
 
+	// This configures imem callbacks
+	sprintf( imem_get_conf,
+		":imem-get=%" PRIdPTR,
+		(intptr_t)(void*)&imem_get );
+
+	sprintf( imem_release_conf,
+		":imem-release=%" PRIdPTR,
+		(intptr_t)(void*)&imem_release );
+
+	sprintf( imem_data_conf,
+		":imem-data=%" PRIdPTR,
+		(intptr_t)(void*)self );
+
+	// Create media...
+	self->media = libvlc_media_new_location( self->vlc, imem_video_conf );
+	assert( self->media != NULL );
+
+	// ...and apply configuration parameters.
+	libvlc_media_add_option( self->media, imem_audio_conf );
+	libvlc_media_add_option( self->media, imem_get_conf );
+	libvlc_media_add_option( self->media, imem_release_conf );
+	libvlc_media_add_option( self->media, imem_data_conf );
+
+	// Setup sout chain if we're not outputting to window
+	if ( !self->output_to_window )
+	{
+		setup_vlc_sout( self );
+	}
+}
+
+static void setup_vlc_sout( consumer_libvlc self )
+{
+	assert( self->media != NULL );
+
+	mlt_properties properties = MLT_CONSUMER_PROPERTIES( self->parent );
+
+	char sout_conf[ 512 ];
+
 	// This configures file output
-	sprintf( output_string, ":sout=#transcode{"
+	sprintf( sout_conf, ":sout=#transcode{"
 		"vcodec=%s,fps=%s,width=%d,height=%d,vb=%d,"
 		"acodec=%s,channels=%d,samplerate=%d,ab=%d}"
 		":standard{access=%s,mux=%s,dst=\"%s\"}",
@@ -153,26 +198,44 @@ static void setup_vlc( consumer_libvlc self )
 		mlt_properties_get( properties, "output_mux" ),
 		mlt_properties_get( properties, "output_dst" ) );
 
-	// This configures imem callbacks
-	sprintf( imem_get_conf,
-		":imem-get=%" PRIdPTR,
-		(intptr_t)(void*)&imem_get );
+	libvlc_media_add_option( self->media, sout_conf );
+}
 
-	sprintf( imem_release_conf,
-		":imem-release=%" PRIdPTR,
-		(intptr_t)(void*)&imem_release );
+static int setup_vlc_window( consumer_libvlc self )
+{
+	mlt_properties properties = MLT_CONSUMER_PROPERTIES( self->parent );
 
-	sprintf( imem_data_conf,
-		":imem-data=%" PRIdPTR,
-		(intptr_t)(void*)self );
+	char *window_type = mlt_properties_get( properties, "window_type" );
+	void *window_handle = mlt_properties_get_data( properties, "output_dst", NULL );
 
-	self->media = libvlc_media_new_location( self->vlc, video_string );
-	assert( self->media != NULL );
-	libvlc_media_add_option( self->media, imem_get_conf );
-	libvlc_media_add_option( self->media, imem_release_conf );
-	libvlc_media_add_option( self->media, imem_data_conf );
-	libvlc_media_add_option( self->media, audio_string );
-	libvlc_media_add_option( self->media, output_string );
+	if ( window_type != NULL && window_handle != NULL )
+	{
+		if ( !strcmp( window_type, "nsobject") )
+		{
+			libvlc_media_player_set_nsobject( self->media_player, window_handle );
+		}
+		else if ( !strcmp( window_type, "xwindow" ) )
+		{
+			libvlc_media_player_set_xwindow( self->media_player, ( uint32_t )window_handle );
+		}
+		else if ( !strcmp( window_type, "hwnd" ) )
+		{
+			libvlc_media_player_set_hwnd( self->media_player, window_handle );
+		}
+		else
+		{
+			// Some unknown window_type was passed
+			return 1;
+		}
+
+		// Setup finished successfully
+		return 0;
+	}
+	else
+	{
+		// We failed to get window_type and/or window_handle
+		return 1;
+	}
 }
 
 static int imem_get( void *data, const char* cookie, int64_t *dts, int64_t *pts,
@@ -347,6 +410,9 @@ static int consumer_start( mlt_consumer parent )
 	consumer_libvlc self = parent->child;
 	assert( self != NULL );
 
+	mlt_properties properties = MLT_CONSUMER_PROPERTIES( self->parent );
+
+
 	if ( consumer_is_stopped( parent ) )
 	{
 		// Free all previous resources
@@ -365,6 +431,23 @@ static int consumer_start( mlt_consumer parent )
 		setup_vlc( self );
 		self->media_player = libvlc_media_player_new_from_media( self->media );
 		assert( self->media_player != NULL );
+
+		// Set window output if we're using it
+		if ( self->output_to_window )
+		{
+			err = setup_vlc_window( self );
+
+			if ( err )
+			{
+				char error_msg[] = "Wrong window_type and/or output_dst parameters supplied.\n";
+				char *window_type = mlt_properties_get( properties, "window_type" );
+				mlt_log_error( MLT_CONSUMER_SERVICE( self->parent ), error_msg );
+				mlt_events_fire( properties, "consumer-fatal-error", NULL );
+				return err;
+			}
+		}
+
+		// Catch media_player stop
 		self->mp_manager = libvlc_media_player_event_manager( self->media_player );
 		assert( self->mp_manager != NULL );
 		libvlc_event_attach( self->mp_manager, libvlc_MediaPlayerStopped, &mp_callback, self );
@@ -378,8 +461,9 @@ static int consumer_start( mlt_consumer parent )
 		err = libvlc_media_player_play( self->media_player );
 
 		// If we failed to play, we're not running
-		if ( err )
+		if ( err ) {
 			self->running = 0;
+		}
 
 		return err;
 	}

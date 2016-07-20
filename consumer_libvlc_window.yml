@@ -1,0 +1,39 @@
+schema_version: 0.1
+type: consumer
+identifier: libvlc_window
+title: libVLC Window
+version: 1
+creator: Pawel Golinski
+license: LGPL
+language: en
+tags:
+  - Audio
+  - Video
+description: >
+  libVLC video and audio output module. It uses VLC window output.
+  It can be set up using usual MLT consumer properties and additional
+  libVLC specific properties described here.
+parameters:
+  - identifier: output_dst
+    argument: yes
+    title: Window handle
+    description: Window, to which libVLC should render the media.
+    required: yes
+
+  - identifier: window_type
+    title: Window type
+    type: string
+    description: Type of the window, the output_dst points to (xwindow/nsobject/hwnd)
+    required: yes
+
+  - identifier: input_vcodec
+    title: Input vcodec
+    type: string
+    description: Format, in which raw video frames will be supplied to the consumer.
+    default: RGBA
+
+  - identifier: input_acodec
+    title: Input acodec
+    type: string
+    description: Format, in which raw audio frames will be supplied to the consumer.
+    default: s16l

@@ -17,6 +17,8 @@ MLT_REPOSITORY
 {
 	MLT_REGISTER( producer_type, "libvlc", producer_libvlc_init );
 	MLT_REGISTER( consumer_type, "libvlc", consumer_libvlc_init );
+	MLT_REGISTER( consumer_type, "libvlc_window", consumer_libvlc_init );
 
 	MLT_REGISTER_METADATA( consumer_type, "libvlc", metadata, "consumer_libvlc.yml" );
+	MLT_REGISTER_METADATA( consumer_type, "libvlc_window", metadata, "consumer_libvlc_window.yml" );
 }
