@@ -366,6 +366,7 @@ static void imem_release( void *data, const char* cookie, size_t buffSize, void 
 			mlt_properties properties = MLT_CONSUMER_PROPERTIES( self->parent );
 			mlt_frame frame = self->video_imem_data;
 			mlt_events_fire( properties, "consumer-frame-show", frame, NULL );
+			mlt_frame_close( frame );
 			self->video_imem_data = NULL;
 		}
 	}
@@ -376,6 +377,7 @@ static void imem_release( void *data, const char* cookie, size_t buffSize, void 
 			mlt_properties properties = MLT_CONSUMER_PROPERTIES( self->parent );
 			mlt_frame frame = self->audio_imem_data;
 			mlt_events_fire( properties, "consumer-frame-show", frame, NULL );
+			mlt_frame_close( frame );
 			self->audio_imem_data = NULL;
 
 		}
