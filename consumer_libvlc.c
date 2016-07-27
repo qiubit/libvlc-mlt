@@ -45,6 +45,7 @@ struct consumer_libvlc_s
 static void setup_vlc( consumer_libvlc self );
 static void setup_vlc_sout( consumer_libvlc self );
 static int setup_vlc_window( consumer_libvlc self );
+static void setup_vlc_properties( consumer_libvlc self );
 static int imem_get( void *data, const char* cookie, int64_t *dts, int64_t *pts,
 					 unsigned *flags, size_t *bufferSize, void **buffer );
 static void imem_release( void *data, const char* cookie, size_t buffSize, void *buffer );
@@ -111,11 +112,39 @@ mlt_consumer consumer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 	return parent;
 }
 
+static void setup_vlc_properties( consumer_libvlc self )
+{
+	mlt_properties properties = MLT_CONSUMER_PROPERTIES( self->parent );
+
+	// Create a consistent snapshot of properties to be used during media_player runtime
+	mlt_properties_set_int( properties, "_vlc_width", mlt_properties_get_int( properties, "width" ) );
+	mlt_properties_set_int( properties, "_vlc_height", mlt_properties_get_int( properties, "height" ) );
+	mlt_properties_set( properties, "_vlc_display_ratio", mlt_properties_get( properties, "display_ratio" ) );
+	mlt_properties_set( properties, "_vlc_fps", mlt_properties_get( properties, "fps" ) );
+	mlt_properties_set( properties, "_vlc_input_vcodec", mlt_properties_get( properties, "input_vcodec" ) );
+	mlt_properties_set( properties, "_vlc_input_acodec", mlt_properties_get( properties, "input_acodec" ) );
+	mlt_properties_set_int( properties, "_vlc_frequency", mlt_properties_get_int( properties, "frequency" ) );
+	mlt_properties_set_int( properties, "_vlc_channels", mlt_properties_get_int( properties, "channels" ) );
+	mlt_properties_set( properties, "_vlc_window_type", mlt_properties_get( properties, "window_type" ) );
+	mlt_properties_set( properties, "_vlc_output_dst", mlt_properties_get( properties, "output_dst" ) );
+	mlt_properties_set_data( properties, "_vlc_output_dst", mlt_properties_get_data( properties, "output_dst", NULL ), 0, NULL, NULL );
+	mlt_properties_set_int( properties, "_vlc_output_vb", mlt_properties_get_int( properties, "output_vb" ) );
+	mlt_properties_set_int( properties, "_vlc_output_ab", mlt_properties_get_int( properties, "output_ab" ) );
+	mlt_properties_set( properties, "_vlc_output_vcodec", mlt_properties_get( properties, "output_vcodec" ) );
+	mlt_properties_set( properties, "_vlc_output_acodec", mlt_properties_get( properties, "output_acodec" ) );
+	mlt_properties_set( properties, "_vlc_output_access", mlt_properties_get( properties, "output_access" ) );
+	mlt_properties_set( properties, "_vlc_output_mux", mlt_properties_get( properties, "output_mux" ) );
+
+}
+
 static void setup_vlc( consumer_libvlc self )
 {
 	mlt_properties properties = MLT_CONSUMER_PROPERTIES( self->parent );
 
 	// imem setup phase
+
+	// Copy some properties to make them consistent throughout media_player runtime
+	setup_vlc_properties( self );
 
 	// Allocate buffers
 	char imem_video_conf[ 512 ];
@@ -126,17 +155,17 @@ static void setup_vlc( consumer_libvlc self )
 
 	// We will create media using imem MRL
 	sprintf( imem_video_conf, "imem://width=%i:height=%i:dar=%s:fps=%s/1:cookie=0:codec=%s:cat=2:caching=0",
-		mlt_properties_get_int( properties, "width" ),
-		mlt_properties_get_int( properties, "height" ),
-		mlt_properties_get( properties, "display_ratio" ),
-		mlt_properties_get( properties, "fps" ),
-		mlt_properties_get( properties, "input_vcodec" ) );
+		mlt_properties_get_int( properties, "_vlc_width" ),
+		mlt_properties_get_int( properties, "_vlc_height" ),
+		mlt_properties_get( properties, "_vlc_display_ratio" ),
+		mlt_properties_get( properties, "_vlc_fps" ),
+		mlt_properties_get( properties, "_vlc_input_vcodec" ) );
 
 	// Audio stream will be added as input slave
 	sprintf( imem_audio_conf, ":input-slave=imem://cookie=1:cat=1:codec=%s:samplerate=%d:channels=%d:caching=0",
-		mlt_properties_get( properties, "input_acodec" ),
-		mlt_properties_get_int( properties, "frequency" ),
-		mlt_properties_get_int( properties, "channels" ) );
+		mlt_properties_get( properties, "_vlc_input_acodec" ),
+		mlt_properties_get_int( properties, "_vlc_frequency" ),
+		mlt_properties_get_int( properties, "_vlc_channels" ) );
 
 	// This configures imem callbacks
 	sprintf( imem_get_conf,
@@ -181,18 +210,18 @@ static void setup_vlc_sout( consumer_libvlc self )
 		"vcodec=%s,fps=%s,width=%d,height=%d,vb=%d,"
 		"acodec=%s,channels=%d,samplerate=%d,ab=%d}"
 		":standard{access=%s,mux=%s,dst=\"%s\"}",
-		mlt_properties_get( properties, "output_vcodec" ),
-		mlt_properties_get( properties, "fps" ),
-		mlt_properties_get_int( properties, "width" ),
-		mlt_properties_get_int( properties, "height" ),
-		mlt_properties_get_int( properties, "output_vb" ),
-		mlt_properties_get( properties, "output_acodec" ),
-		mlt_properties_get_int( properties, "channels" ),
-		mlt_properties_get_int( properties, "frequency" ),
-		mlt_properties_get_int( properties, "output_ab" ),
-		mlt_properties_get( properties, "output_access" ),
-		mlt_properties_get( properties, "output_mux" ),
-		mlt_properties_get( properties, "output_dst" ) );
+		mlt_properties_get( properties, "_vlc_output_vcodec" ),
+		mlt_properties_get( properties, "_vlc_fps" ),
+		mlt_properties_get_int( properties, "_vlc_width" ),
+		mlt_properties_get_int( properties, "_vlc_height" ),
+		mlt_properties_get_int( properties, "_vlc_output_vb" ),
+		mlt_properties_get( properties, "_vlc_output_acodec" ),
+		mlt_properties_get_int( properties, "_vlc_channels" ),
+		mlt_properties_get_int( properties, "_vlc_frequency" ),
+		mlt_properties_get_int( properties, "_vlc_output_ab" ),
+		mlt_properties_get( properties, "_vlc_output_access" ),
+		mlt_properties_get( properties, "_vlc_output_mux" ),
+		mlt_properties_get( properties, "_vlc_output_dst" ) );
 
 	libvlc_media_add_option( self->media, sout_conf );
 }
@@ -201,8 +230,8 @@ static int setup_vlc_window( consumer_libvlc self )
 {
 	mlt_properties properties = MLT_CONSUMER_PROPERTIES( self->parent );
 
-	char *window_type = mlt_properties_get( properties, "window_type" );
-	void *window_handle = mlt_properties_get_data( properties, "output_dst", NULL );
+	char *window_type = mlt_properties_get( properties, "_vlc_window_type" );
+	void *window_handle = mlt_properties_get_data( properties, "_vlc_output_dst", NULL );
 
 	if ( window_type != NULL && window_handle != NULL )
 	{
@@ -275,9 +304,9 @@ static int imem_get( void *data, const char* cookie, int64_t *dts, int64_t *pts,
 			self->audio_imem_data = NULL;
 
 			mlt_audio_format afmt = mlt_audio_s16;
-			double fps = mlt_properties_get_double( properties, "fps" );
-			int frequency = mlt_properties_get_int( properties, "frequency" );
-			int channels = mlt_properties_get_int( properties, "channels" );
+			double fps = mlt_properties_get_double( properties, "_vlc_fps" );
+			int frequency = mlt_properties_get_int( properties, "_vlc_frequency" );
+			int channels = mlt_properties_get_int( properties, "_vlc_channels" );
 			int samples = mlt_sample_calculator( fps, frequency, mlt_frame_original_position( frame ) );
 			double pts_diff = ( double )samples / ( double )frequency * 1000000.0;
 
@@ -310,12 +339,12 @@ static int imem_get( void *data, const char* cookie, int64_t *dts, int64_t *pts,
 		{
 			self->video_imem_data = NULL;
 
-			double fps = mlt_properties_get_double( properties, "fps" );
+			double fps = mlt_properties_get_double( properties, "_vlc_fps" );
 			double pts_diff = 1.0 / fps * 1000000.0;
 
 			mlt_image_format vfmt = mlt_image_rgb24a;
-			int width = mlt_properties_get_int( properties, "width" );
-			int height = mlt_properties_get_int( properties, "height" );
+			int width = mlt_properties_get_int( properties, "_vlc_width" );
+			int height = mlt_properties_get_int( properties, "_vlc_height" );
 			mlt_frame_get_image( frame, ( uint8_t ** )buffer, &vfmt, &width, &height, 0 );
 			*bufferSize = mlt_image_format_size( vfmt, width, height, NULL );
 
@@ -433,7 +462,6 @@ static int consumer_start( mlt_consumer parent )
 			if ( err )
 			{
 				char error_msg[] = "Wrong window_type and/or output_dst parameters supplied.\n";
-				char *window_type = mlt_properties_get( properties, "window_type" );
 				mlt_log_error( MLT_CONSUMER_SERVICE( self->parent ), error_msg );
 				mlt_events_fire( properties, "consumer-fatal-error", NULL );
 				return err;
