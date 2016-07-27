@@ -262,8 +262,8 @@ static int imem_get( void *data, const char* cookie, int64_t *dts, int64_t *pts,
 		assert( frame != NULL );
 		double speed = mlt_properties_get_double( MLT_FRAME_PROPERTIES( frame ), "_speed" );
 
-		// We terminate imem on pause
-		if ( speed == 0.0 )
+		// We terminate imem on pause if needed
+		if ( speed == 0.0 && mlt_properties_get_int( properties, "terminate_on_pause" ) )
 		{
 			self->running = 0;
 			pthread_mutex_unlock( &self->queue_mutex );
@@ -300,7 +300,7 @@ static int imem_get( void *data, const char* cookie, int64_t *dts, int64_t *pts,
 		assert( frame != NULL );
 		double speed = mlt_properties_get_double( MLT_FRAME_PROPERTIES( frame ), "_speed" );
 
-		if ( speed == 0.0 )
+		if ( speed == 0.0 && mlt_properties_get_int( properties, "terminate_on_pause" ) )
 		{
 			self->running = 0;
 			pthread_mutex_unlock( &self->queue_mutex );
