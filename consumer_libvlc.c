@@ -10,23 +10,15 @@
 #define VIDEO_COOKIE 0
 #define AUDIO_COOKIE 1
 
+static int consumers = 1;
+
 // Debug code
-
-pthread_mutex_t log_mutex;
-
-static void log_cb( void *data, int level, const libvlc_log_t *ctx, const char *fmt, va_list args )
-{
-	pthread_mutex_lock( &log_mutex );
-	printf( "VLC LOG: " );
-	vprintf( fmt, args );
-	printf( "\n" );
-	pthread_mutex_unlock( &log_mutex );
-}
 
 typedef struct consumer_libvlc_s *consumer_libvlc;
 
 struct consumer_libvlc_s
 {
+	int id;
 	mlt_consumer parent;
 	libvlc_instance_t *vlc;
 	libvlc_media_t *media;
@@ -41,6 +33,20 @@ struct consumer_libvlc_s
 	int running;
 	int output_to_window;
 };
+
+pthread_mutex_t log_mutex;
+
+static void log_cb( void *data, int level, const libvlc_log_t *ctx, const char *fmt, va_list args )
+{
+	consumer_libvlc self = data;
+	int consumer_id = self->id;
+
+	pthread_mutex_lock( &log_mutex );
+	printf( "VLC LOG %d : ", consumer_id );
+	vprintf( fmt, args );
+	printf( "\n" );
+	pthread_mutex_unlock( &log_mutex );
+}
 
 static void setup_vlc( consumer_libvlc self );
 static void setup_vlc_sout( consumer_libvlc self );
@@ -91,7 +97,7 @@ mlt_consumer consumer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 	assert( self->vlc != NULL );
 
 	// Debug code
-	libvlc_log_set( self->vlc, log_cb, NULL );
+	libvlc_log_set( self->vlc, log_cb, self );
 	pthread_mutex_init( &log_mutex, NULL );
 
 	self->frame_queue = mlt_deque_init( );
@@ -195,6 +201,9 @@ static void setup_vlc( consumer_libvlc self )
 	{
 		setup_vlc_sout( self );
 	}
+
+	self->id = consumers;
+	consumers++;
 }
 
 static void setup_vlc_sout( consumer_libvlc self )
