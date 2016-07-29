@@ -34,18 +34,29 @@ struct consumer_libvlc_s
 	int output_to_window;
 };
 
-pthread_mutex_t log_mutex;
-
-static void log_cb( void *data, int level, const libvlc_log_t *ctx, const char *fmt, va_list args )
+static void log_cb( void *data, int vlc_level, const libvlc_log_t *ctx, const char *fmt, va_list args )
 {
 	consumer_libvlc self = data;
 	int consumer_id = self->id;
 
-	pthread_mutex_lock( &log_mutex );
-	printf( "VLC LOG %d : ", consumer_id );
-	vprintf( fmt, args );
-	printf( "\n" );
-	pthread_mutex_unlock( &log_mutex );
+	int mlt_level;
+	switch ( vlc_level )
+	{
+		case LIBVLC_DEBUG:
+			mlt_level = MLT_LOG_DEBUG;
+			break;
+		case LIBVLC_NOTICE:
+			mlt_level = MLT_LOG_INFO;
+			break;
+		case LIBVLC_WARNING:
+			mlt_level = MLT_LOG_WARNING;
+			break;
+		case LIBVLC_ERROR:
+		default:
+			mlt_level = MLT_LOG_FATAL;
+	}
+
+	mlt_vlog( MLT_CONSUMER_SERVICE( self->parent ), mlt_level, fmt, args );
 }
 
 static void setup_vlc( consumer_libvlc self );
@@ -98,7 +109,6 @@ mlt_consumer consumer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 
 	// Debug code
 	libvlc_log_set( self->vlc, log_cb, self );
-	pthread_mutex_init( &log_mutex, NULL );
 
 	self->frame_queue = mlt_deque_init( );
 	assert( self->frame_queue != NULL );
