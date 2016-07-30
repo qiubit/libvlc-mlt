@@ -91,8 +91,8 @@ mlt_consumer consumer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 	self->parent = parent;
 
 	// Set default libVLC specific properties
-	mlt_properties_set( properties, "input_vcodec", "RGBA" );
-	mlt_properties_set( properties, "input_acodec", "s16l" );
+	mlt_properties_set_int( properties, "input_image_format", mlt_image_yuv422 );
+	mlt_properties_set_int( properties, "input_audio_format", mlt_audio_s16 );
 	mlt_properties_set( properties, "output_vcodec", "mp2v" );
 	mlt_properties_set( properties, "output_acodec", "mpga" );
 	mlt_properties_set_int( properties, "output_vb", 8000000 );
@@ -137,8 +137,8 @@ static void setup_vlc_properties( consumer_libvlc self )
 	mlt_properties_set_int( properties, "_vlc_height", mlt_properties_get_int( properties, "height" ) );
 	mlt_properties_set( properties, "_vlc_display_ratio", mlt_properties_get( properties, "display_ratio" ) );
 	mlt_properties_set( properties, "_vlc_fps", mlt_properties_get( properties, "fps" ) );
-	mlt_properties_set( properties, "_vlc_input_vcodec", mlt_properties_get( properties, "input_vcodec" ) );
-	mlt_properties_set( properties, "_vlc_input_acodec", mlt_properties_get( properties, "input_acodec" ) );
+	mlt_properties_set_int( properties, "_vlc_input_image_format", mlt_properties_get_int( properties, "input_image_format" ) );
+	mlt_properties_set_int( properties, "_vlc_input_audio_format", mlt_properties_get_int( properties, "input_audio_format" ) );
 	mlt_properties_set_int( properties, "_vlc_frequency", mlt_properties_get_int( properties, "frequency" ) );
 	mlt_properties_set_int( properties, "_vlc_channels", mlt_properties_get_int( properties, "channels" ) );
 	mlt_properties_set( properties, "_vlc_window_type", mlt_properties_get( properties, "window_type" ) );
@@ -169,17 +169,69 @@ static void setup_vlc( consumer_libvlc self )
 	char imem_release_conf[ 512 ];
 	char imem_data_conf[ 512 ];
 
+	// Translate input_image_format and input_audio_format from MLT format to VLC format
+	const char *vlc_input_vcodec;
+
+	const char RV24[] = "RV24";
+	const char RGBA[] = "RGBA";
+	const char YUV2[] = "YUY2";
+	const char I420[] = "I420";
+
+	switch ( mlt_properties_get_int( properties, "_vlc_input_image_format" ) )
+	{
+		case mlt_image_rgb24:
+			vlc_input_vcodec = RV24;
+			break;
+		case mlt_image_rgb24a:
+			vlc_input_vcodec = RGBA;
+			break;
+		case mlt_image_yuv422:
+			vlc_input_vcodec = YUV2;
+			break;
+		case mlt_image_yuv420p:
+			vlc_input_vcodec = I420;
+			break;
+		default:
+			mlt_log_verbose( MLT_CONSUMER_SERVICE( self->parent ), "Unsupported input_image_format. Defaulting to yuv422.\n" );
+			vlc_input_vcodec = YUV2;
+			break;
+	}
+
+	const char *vlc_input_acodec;
+
+	const char s16l[] = "s16l";
+	const char s32l[] = "s32l";
+	const char fl32[] = "fl32";
+
+	switch ( mlt_properties_get_int( properties, "_vlc_input_audio_format" ) )
+	{
+		case mlt_audio_s16:
+			vlc_input_acodec = s16l;
+			break;
+		case mlt_audio_s32le:
+			vlc_input_acodec = s32l;
+			break;
+		case mlt_audio_f32le:
+			vlc_input_acodec = fl32;
+			break;
+		default:
+			mlt_log_verbose( MLT_CONSUMER_SERVICE( self->parent ), "Unsupported input_audio_format. Defaulting to s16.\n" );
+			vlc_input_acodec = s16l;
+			break;
+	}
+
+
 	// We will create media using imem MRL
 	sprintf( imem_video_conf, "imem://width=%i:height=%i:dar=%s:fps=%s/1:cookie=0:codec=%s:cat=2:caching=0",
 		mlt_properties_get_int( properties, "_vlc_width" ),
 		mlt_properties_get_int( properties, "_vlc_height" ),
 		mlt_properties_get( properties, "_vlc_display_ratio" ),
 		mlt_properties_get( properties, "_vlc_fps" ),
-		mlt_properties_get( properties, "_vlc_input_vcodec" ) );
+		vlc_input_vcodec );
 
 	// Audio stream will be added as input slave
 	sprintf( imem_audio_conf, ":input-slave=imem://cookie=1:cat=1:codec=%s:samplerate=%d:channels=%d:caching=0",
-		mlt_properties_get( properties, "_vlc_input_acodec" ),
+		vlc_input_acodec,
 		mlt_properties_get_int( properties, "_vlc_frequency" ),
 		mlt_properties_get_int( properties, "_vlc_channels" ) );
 
@@ -322,7 +374,7 @@ static int imem_get( void *data, const char* cookie, int64_t *dts, int64_t *pts,
 			// This is used to pass frames to imem_release() if they need cleanup
 			self->audio_imem_data = NULL;
 
-			mlt_audio_format afmt = mlt_audio_s16;
+			mlt_audio_format afmt = mlt_properties_get_int( properties, "_vlc_input_audio_format" );
 			double fps = mlt_properties_get_double( properties, "_vlc_fps" );
 			int frequency = mlt_properties_get_int( properties, "_vlc_frequency" );
 			int channels = mlt_properties_get_int( properties, "_vlc_channels" );
@@ -330,7 +382,7 @@ static int imem_get( void *data, const char* cookie, int64_t *dts, int64_t *pts,
 			double pts_diff = ( double )samples / ( double )frequency * 1000000.0;
 
 			mlt_frame_get_audio( frame, buffer, &afmt, &frequency, &channels, &samples );
-			*bufferSize = samples * sizeof( int16_t ) * channels;
+			*bufferSize = mlt_audio_format_size( afmt, samples, channels );
 
 			*pts = self->latest_audio_pts + pts_diff + 0.5;
 			*dts = *pts;
@@ -361,7 +413,7 @@ static int imem_get( void *data, const char* cookie, int64_t *dts, int64_t *pts,
 			double fps = mlt_properties_get_double( properties, "_vlc_fps" );
 			double pts_diff = 1.0 / fps * 1000000.0;
 
-			mlt_image_format vfmt = mlt_image_rgb24a;
+			mlt_image_format vfmt = mlt_properties_get_int( properties, "_vlc_input_image_format" );
 			int width = mlt_properties_get_int( properties, "_vlc_width" );
 			int height = mlt_properties_get_int( properties, "_vlc_height" );
 			mlt_frame_get_image( frame, ( uint8_t ** )buffer, &vfmt, &width, &height, 0 );

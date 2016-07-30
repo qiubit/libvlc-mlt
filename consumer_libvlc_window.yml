@@ -26,14 +26,14 @@ parameters:
     description: Type of the window, the output_dst points to (xwindow/nsobject/hwnd)
     required: yes
 
-  - identifier: input_vcodec
-    title: Input vcodec
-    type: string
-    description: Format, in which raw video frames will be supplied to the consumer.
-    default: RGBA
+  - identifier: input_image_format
+    title: Input image format
+    type: integer
+    description: mlt_image_format, in which raw video frames will be supplied to the consumer.
+    default: mlt_image_yuv422
 
-  - identifier: input_acodec
-    title: Input acodec
-    type: string
-    description: Format, in which raw audio frames will be supplied to the consumer.
-    default: s16l
+  - identifier: input_audio_format
+    title: Input audio format
+    type: integer
+    description: mlt_audio_format, in which raw audio frames will be supplied to the consumer.
+    default: mlt_audio_s16
