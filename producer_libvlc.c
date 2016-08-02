@@ -31,10 +31,10 @@ struct v_cache_item_s
 {
 	uint8_t *buffer;
 	size_t size;
+	int64_t pts;
 	int bpp;
 	int width;
 	int height;
-	int64_t pts;
 };
 
 // Audio cache item
@@ -44,14 +44,14 @@ struct a_cache_item_s
 	void *buffer;
 	// number of samples per channel
 	size_t samples;
+	// pts
+	int64_t pts;
 	// number of channels
 	int channels;
 	// sample rate
 	int sample_rate;
 	// bits per sample
 	int bps;
-	// pts
-	int64_t pts;
 };
 
 struct producer_libvlc_s
