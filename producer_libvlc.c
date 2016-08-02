@@ -672,15 +672,6 @@ static void video_postrender_callback( void *data, uint8_t *buffer, int width, i
 		// Allocate space for cache data
 		v_cache_item v_item = calloc( 1, sizeof( struct v_cache_item_s ) );
 
-		// Exchange red with blue (for some reason libVLC has
-		// has different representation of RGB24 than MLT)
-		for (i = 0; i+2 < buffer_size; i += 3)
-		{
-			uint8_t temp = buffer[ i ];
-			buffer[ i ] = buffer[ i + 2 ];
-			buffer[ i + 2 ] = temp;
-		}
-
 		// Move stuff to cache
 		v_item->buffer = buffer;
 		v_item->size = size;
