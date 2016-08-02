@@ -22,17 +22,6 @@
 // these are here to assure that I have proper
 // understanding of libVLC (and should be reviewed as well).
 
-pthread_mutex_t log_mutex;
-
-static void log_cb(void *data, int level, const libvlc_log_t *ctx, const char *fmt, va_list args)
-{
-	pthread_mutex_lock(&log_mutex);
-	printf("VLC LOG: ");
-	vprintf(fmt, args);
-	printf("\n");
-	pthread_mutex_unlock(&log_mutex);
-}
-
 typedef struct producer_libvlc_s *producer_libvlc;
 typedef struct a_cache_item_s *a_cache_item;
 typedef struct v_cache_item_s *v_cache_item;
@@ -115,6 +104,46 @@ struct producer_libvlc_s
 	int audio_gots;
 };
 
+static void log_cb( void *data, int vlc_level, const libvlc_log_t *ctx, const char *fmt, va_list args )
+{
+	if ( data == NULL )
+		return;
+
+	producer_libvlc self = data;
+
+	int mlt_level;
+	switch ( vlc_level )
+	{
+		case LIBVLC_DEBUG:
+			mlt_level = MLT_LOG_DEBUG;
+			break;
+		case LIBVLC_NOTICE:
+			mlt_level = MLT_LOG_INFO;
+			break;
+		case LIBVLC_WARNING:
+			mlt_level = MLT_LOG_WARNING;
+			break;
+		case LIBVLC_ERROR:
+		default:
+			mlt_level = MLT_LOG_FATAL;
+	}
+
+	// In order to get readable output from MLT default log handler,
+	// we need to end our message with newline, VLC doesn't do that
+	size_t fmt_len = strlen( fmt );
+	// + \n + \0
+	char *fmt_nl = calloc( fmt_len + 1 + 1, sizeof( char ) );
+	if ( fmt_nl == NULL )
+		return;
+
+	strcat( fmt_nl, fmt );
+	strcat( fmt_nl, "\n" );
+
+	mlt_vlog( MLT_PRODUCER_SERVICE( self->parent ), mlt_level, fmt_nl, args );
+
+	free( fmt_nl );
+}
+
 // Forward references
 static int producer_get_frame( mlt_producer producer, mlt_frame_ptr frame, int index );
 static void set_properties( producer_libvlc self, mlt_profile profile );
@@ -162,8 +191,7 @@ mlt_producer producer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 	libvlc_initialized = 1;
 
 	// Left for debugging
-	libvlc_log_set(self->libvlc_instance, log_cb, NULL);
-	pthread_mutex_init(&log_mutex, NULL);
+	libvlc_log_set( self->libvlc_instance, log_cb, self );
 
 	// Initialize media
 	self->media = libvlc_media_new_path( self->libvlc_instance, file );
@@ -286,8 +314,8 @@ static void collect_timestamp_data( producer_libvlc self )
 	// 0.5 added for rounding
 	self->average_audio_pts_diff = ( double )self->average_audio_pts_diff / ( FRAMES_FOR_DATA_COLLECTION - 1 ) + 0.5;
 	self->average_video_pts_diff = ( double )self->average_video_pts_diff / ( FRAMES_FOR_DATA_COLLECTION - 1 ) + 0.5;
-	printf("MLT LOG average audio diff %" PRId64 "\n", self->average_audio_pts_diff);
-	printf("MLT LOG average video diff %" PRId64 "\n", self->average_video_pts_diff);
+	//printf("MLT LOG average audio diff %" PRId64 "\n", self->average_audio_pts_diff);
+	//printf("MLT LOG average video diff %" PRId64 "\n", self->average_video_pts_diff);
 	self->collecting_pts_data = 0;
 	pthread_mutex_unlock( &self->pts_data_mutex );
 }
@@ -373,15 +401,15 @@ static void seek_smem( producer_libvlc self, mlt_position position )
 	{
 		// We are seeking...
 		pthread_mutex_lock( &self->seek_mutex );
-		printf("seeking to time %" PRId64 "\n", seek_timestamp);
+		// printf("seeking to time %" PRId64 "\n", seek_timestamp);
 		self->seek_pending = 1;
 		libvlc_media_player_set_time( media_player, seek_timestamp );
-		printf("seeking pending\n");
+		//printf("seeking pending\n");
 		while ( self->seek_pending )
 		{
 			pthread_cond_wait( &self->seek_cond, &self->seek_mutex );
 		}
-		printf("seeking complete\n");
+		//printf("seeking complete\n");
 	}
 }
 
@@ -657,8 +685,8 @@ static void video_postrender_callback( void *data, uint8_t *buffer, int width, i
 		if ( self->first_pts == NO_PTS_VALUE )
 			self->first_pts = pts;
 
-		printf("VIDEO PTS %" PRId64 "\n", pts);
-		printf("VIDEO timestamp %" PRId64 "\n", (pts - self->first_pts)/1000);
+		// printf("VIDEO PTS %" PRId64 "\n", pts);
+		// printf("VIDEO timestamp %" PRId64 "\n", (pts - self->first_pts)/1000);
 
 		// For some reason width and height returned by smem
 		// seems bogus (when using width * height * bpp / 8 as size
