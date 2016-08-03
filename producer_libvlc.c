@@ -194,9 +194,9 @@ mlt_producer producer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 	return producer;
 
 cleanup:
-	if ( self->vlc ) libvlc_release( self->vlc );
-	if ( self->media ) libvlc_media_release( self->media );
-	if ( self->media_player ) libvlc_media_player_release( self->media_player );
+	if ( self && self->vlc ) libvlc_release( self->vlc );
+	if ( self && self->media ) libvlc_media_release( self->media );
+	if ( self && self->media_player ) libvlc_media_player_release( self->media_player );
 	free( self );
 	free( producer );
 
