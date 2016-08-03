@@ -49,7 +49,7 @@ struct a_cache_item_s
 struct producer_libvlc_s
 {
 	mlt_producer parent;
-	libvlc_instance_t *libvlc_instance;
+	libvlc_instance_t *vlc;
 	libvlc_media_t *media;
 	libvlc_media_player_t *media_player;
 	mlt_deque v_cache;
@@ -136,9 +136,6 @@ mlt_producer producer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 
 	mlt_producer producer = NULL;
 	producer_libvlc self = NULL;
-	int libvlc_initialized = 0;
-	int media_initialized = 0;
-	int media_player_initialized = 0;
 
 	// Construct the producer
 	self = calloc( 1, sizeof( struct producer_libvlc_s ) );
@@ -154,17 +151,15 @@ mlt_producer producer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 	producer->close = producer_close;
 
 	// Initialize libVLC
-	self->libvlc_instance = libvlc_new( 0, NULL );
-	if ( self->libvlc_instance == NULL ) goto cleanup;
-	libvlc_initialized = 1;
+	self->vlc = libvlc_new( 0, NULL );
+	if ( self->vlc == NULL ) goto cleanup;
 
 	// Left for debugging
-	libvlc_log_set( self->libvlc_instance, log_cb, self );
+	libvlc_log_set( self->vlc, log_cb, self );
 
 	// Initialize media
-	self->media = libvlc_media_new_path( self->libvlc_instance, file );
+	self->media = libvlc_media_new_path( self->vlc, file );
 	if ( self->media == NULL ) goto cleanup;
-	media_initialized = 1;
 
 	// Override virtual function for getting frames
 	producer->get_frame = producer_get_frame;
@@ -192,7 +187,6 @@ mlt_producer producer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 	// Create smem media player
 	self->media_player = libvlc_media_player_new_from_media( self->media );
 	if ( self->media_player == NULL ) goto cleanup;
-	media_player_initialized = 1;
 
 	// TODO: Should this go somewhere else?
 	libvlc_media_player_play( self->media_player );
@@ -200,11 +194,12 @@ mlt_producer producer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 	return producer;
 
 cleanup:
-	if ( libvlc_initialized ) libvlc_release( self->libvlc_instance );
-	if ( media_initialized ) libvlc_media_release( self->media );
-	if ( media_player_initialized ) libvlc_media_player_release( self->media_player );
+	if ( self->vlc ) libvlc_release( self->vlc );
+	if ( self->media ) libvlc_media_release( self->media );
+	if ( self->media_player ) libvlc_media_player_release( self->media_player );
 	free( self );
 	free( producer );
+
 	return NULL;
 }
 
@@ -661,7 +656,7 @@ static void producer_close( mlt_producer parent )
 		// Release libVLC objects
 		libvlc_media_player_release( self->media_player );
 		libvlc_media_release( self->media );
-		libvlc_release( self->libvlc_instance );
+		libvlc_release( self->vlc );
 
 		// Clear video cache
 		v_cache_item v_item;
