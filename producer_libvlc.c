@@ -117,7 +117,7 @@ static void log_cb( void *data, int vlc_level, const libvlc_log_t *ctx, const ch
 // Forward references
 static int producer_get_frame( mlt_producer producer, mlt_frame_ptr frame, int index );
 static void set_properties( producer_libvlc self, mlt_profile profile );
-static void collect_stream_data( producer_libvlc self, char *file );
+static void collect_stream_data( producer_libvlc self );
 static void setup_smem( producer_libvlc self );
 static void producer_close( mlt_producer parent );
 static void audio_prerender_callback( void* p_audio_data, uint8_t** pp_pcm_buffer, size_t size );
@@ -127,6 +127,8 @@ static void audio_postrender_callback( void* p_audio_data, uint8_t* p_pcm_buffer
 static void video_prerender_callback( void *data, uint8_t **p_buffer, size_t size );
 static void video_postrender_callback( void *data, uint8_t *buffer, int width, int height,
 									   int bpp, size_t size, int64_t pts );
+static int setup_vlc( producer_libvlc self );
+static void cleanup_vlc( producer_libvlc self );
 
 mlt_producer producer_libvlc_init( mlt_profile profile, mlt_service_type type, const char *id, char *file )
 {
@@ -156,17 +158,6 @@ mlt_producer producer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 	// Set destructor
 	producer->close = producer_close;
 
-	// Initialize libVLC
-	self->vlc = libvlc_new( 0, NULL );
-	if ( self->vlc == NULL ) goto cleanup;
-
-	// Left for debugging
-	libvlc_log_set( self->vlc, log_cb, self );
-
-	// Initialize media
-	self->media = libvlc_media_new_path( self->vlc, file );
-	if ( self->media == NULL ) goto cleanup;
-
 	// Override virtual function for getting frames
 	producer->get_frame = producer_get_frame;
 
@@ -181,11 +172,47 @@ mlt_producer producer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 	pthread_cond_init( &self->a_cache_producer_cond, NULL );
 	pthread_cond_init( &self->a_cache_consumer_cond, NULL );
 
-	// Collect stream metadata
-	collect_stream_data( self, file );
-
 	// Set properties to make all profile info available to all functions thorugh them
 	set_properties( self, profile );
+
+	// Initialize all neded VLC objects (or cleanup on fail)
+	if ( setup_vlc( self ) ) goto cleanup;
+
+	return producer;
+
+cleanup:
+	free( self );
+	free( producer );
+
+	return NULL;
+}
+
+static int setup_vlc( producer_libvlc self )
+{
+	if ( self == NULL )
+		return 1;
+
+	// Get producer's properties
+	mlt_properties properties = MLT_PRODUCER_PROPERTIES( self->parent );
+
+	// Get resource to open
+	char *file = mlt_properties_get( properties, "resource" );
+	if ( file == NULL )
+		return 1;
+
+	// Initialize VLC instance
+	self->vlc = libvlc_new( 0, NULL );
+	if ( self->vlc == NULL ) goto cleanup;
+
+	// Pass logs to MLT
+	libvlc_log_set( self->vlc, log_cb, self );
+
+	// Initialize VLC media
+	self->media = libvlc_media_new_path( self->vlc, file );
+	if ( self->media == NULL ) goto cleanup;
+
+	// Collect stream metadata
+	collect_stream_data( self );
 
 	// Setup libVLC smem
 	setup_smem( self );
@@ -194,22 +221,44 @@ mlt_producer producer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 	self->media_player = libvlc_media_player_new_from_media( self->media );
 	if ( self->media_player == NULL ) goto cleanup;
 
-	// TODO: Should this go somewhere else?
+	// Release media now, that we don't need it
+	libvlc_media_release( self->media );
+	self->media = NULL;
+
+	// Start smem
 	libvlc_media_player_play( self->media_player );
 
-	return producer;
+	// All went well
+	return 0;
 
 cleanup:
-	if ( self && self->vlc ) libvlc_release( self->vlc );
-	if ( self && self->media ) libvlc_media_release( self->media );
-	if ( self && self->media_player ) libvlc_media_player_release( self->media_player );
-	free( self );
-	free( producer );
-
-	return NULL;
+	cleanup_vlc( self );
+	return 1;
 }
 
-static void collect_stream_data( producer_libvlc self, char *file )
+static void cleanup_vlc( producer_libvlc self )
+{
+	if ( self == NULL )
+		return;
+
+	if ( self->vlc )
+	{
+		libvlc_release( self->vlc );
+		self->vlc = NULL;
+	}
+	if ( self->media )
+	{
+		libvlc_media_release( self->media );
+		self->media = NULL;
+	}
+	if ( self->media_player )
+	{
+		libvlc_media_player_release( self->media_player );
+		self->media_player = NULL;
+	}
+}
+
+static void collect_stream_data( producer_libvlc self )
 {
 	if ( self->media == NULL )
 	{
@@ -259,7 +308,7 @@ static void set_properties( producer_libvlc self, mlt_profile profile )
 
 	mlt_properties properties = MLT_PRODUCER_PROPERTIES( self->parent );
 
-	// Smem uses comma as floating point separator
+	// Smem uses dot as floating point separator
 	mlt_properties_set_lcnumeric( properties, "C" );
 
 	mlt_properties_set_int( properties, "width", profile->width );
