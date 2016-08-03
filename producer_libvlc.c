@@ -147,6 +147,12 @@ mlt_producer producer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 	// Set libVLC's producer parent
 	self->parent = producer;
 
+	// Get the properties
+	mlt_properties properties = MLT_PRODUCER_PROPERTIES( producer );
+
+	// Set the resource property (required for all producers)
+	mlt_properties_set( properties, "resource", file );
+
 	// Set destructor
 	producer->close = producer_close;
 
