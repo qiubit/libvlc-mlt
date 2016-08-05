@@ -116,9 +116,8 @@ static void log_cb( void *data, int vlc_level, const libvlc_log_t *ctx, const ch
 
 // Forward references
 static int producer_get_frame( mlt_producer producer, mlt_frame_ptr frame, int index );
-static void set_properties( producer_libvlc self, mlt_profile profile );
 static void collect_stream_data( producer_libvlc self );
-static void setup_smem( producer_libvlc self );
+static int setup_smem( producer_libvlc self );
 static void producer_close( mlt_producer parent );
 static void audio_prerender_callback( void* p_audio_data, uint8_t** pp_pcm_buffer, size_t size );
 static void audio_postrender_callback( void* p_audio_data, uint8_t* p_pcm_buffer, unsigned int channels,
@@ -132,9 +131,22 @@ static void cleanup_vlc( producer_libvlc self );
 
 mlt_producer producer_libvlc_init( mlt_profile profile, mlt_service_type type, const char *id, char *file )
 {
+	// If we dealt with allocating mlt_profile, we need to clean it up in case of fail
+	int profile_allocated = 0;
+
 	// If we receive a NULL file argument, we've got nothing to do
 	if ( file == NULL )
 		return NULL;
+
+	// If we receive a NULL profile we can initialize a default one though
+	if ( profile == NULL )
+	{
+		profile = mlt_profile_init( NULL );
+		// But if we fail here too, we've got nothing to do as well...
+		if ( profile == NULL )
+			return NULL;
+		profile_allocated = 1;
+	}
 
 	mlt_producer producer = NULL;
 	producer_libvlc self = NULL;
@@ -146,14 +158,18 @@ mlt_producer producer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 	if ( self == NULL || producer == NULL ) goto cleanup;
 	if ( mlt_producer_init( producer, self ) != 0 ) goto cleanup;
 
+	// Set default properties
+	mlt_properties_set( MLT_PRODUCER_PROPERTIES( producer ), "resource", file );
+	mlt_properties_set_data( MLT_PRODUCER_PROPERTIES( producer ), "_profile", profile, 0, NULL, NULL );
+	mlt_properties_set_double( MLT_PRODUCER_PROPERTIES( producer ), "aspect_ratio", mlt_profile_sar( profile ) );
+	// This is needed because VLC uses dot as floating point separator
+	mlt_properties_set_lcnumeric( MLT_PRODUCER_PROPERTIES( producer ), "C" );
+	// Default audio settings
+	mlt_properties_set_int( MLT_PRODUCER_PROPERTIES( producer ), "channels", 2 );
+	mlt_properties_set_int( MLT_PRODUCER_PROPERTIES( producer ), "frequency", 48000 );
+
 	// Set libVLC's producer parent
 	self->parent = producer;
-
-	// Get the properties
-	mlt_properties properties = MLT_PRODUCER_PROPERTIES( producer );
-
-	// Set the resource property (required for all producers)
-	mlt_properties_set( properties, "resource", file );
 
 	// Set destructor
 	producer->close = producer_close;
@@ -172,15 +188,13 @@ mlt_producer producer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 	pthread_cond_init( &self->a_cache_producer_cond, NULL );
 	pthread_cond_init( &self->a_cache_consumer_cond, NULL );
 
-	// Set properties to make all profile info available to all functions thorugh them
-	set_properties( self, profile );
-
 	// Initialize all neded VLC objects (or cleanup on fail)
 	if ( setup_vlc( self ) ) goto cleanup;
 
 	return producer;
 
 cleanup:
+	if ( profile_allocated ) mlt_profile_close( profile );
 	free( self );
 	free( producer );
 
@@ -215,7 +229,7 @@ static int setup_vlc( producer_libvlc self )
 	collect_stream_data( self );
 
 	// Setup libVLC smem
-	setup_smem( self );
+	if ( setup_smem( self ) ) goto cleanup;
 
 	// Create smem media player
 	self->media_player = libvlc_media_player_new_from_media( self->media );
@@ -301,32 +315,28 @@ static void collect_stream_data( producer_libvlc self )
 	libvlc_media_tracks_release( tracks, nb_tracks );
 }
 
-static void set_properties( producer_libvlc self, mlt_profile profile )
+static int setup_smem( producer_libvlc self )
 {
-	// TODO: Don't know what to do about that yet
-	assert( profile != NULL );
+	mlt_profile profile = mlt_service_profile( MLT_PRODUCER_SERVICE( self->parent ) );
+	if ( profile == NULL )
+	{
+		mlt_log( MLT_PRODUCER_SERVICE( self->parent ), MLT_LOG_ERROR, "%s\n", "setup_smem: Could not fetch mlt_profile\n" );
+		return 1;
+	}
 
-	mlt_properties properties = MLT_PRODUCER_PROPERTIES( self->parent );
-
-	// Smem uses dot as floating point separator
-	mlt_properties_set_lcnumeric( properties, "C" );
-
-	mlt_properties_set_int( properties, "width", profile->width );
-
-	mlt_properties_set_int( properties, "height", profile->height );
-	mlt_properties_set_double( properties, "fps", mlt_profile_fps( profile ) );
-
-	// Default audio settings
-	mlt_properties_set_int( properties, "channels", 2 );
-	mlt_properties_set_int( properties, "frequency", 48000 );
-}
-
-static void setup_smem( producer_libvlc self )
-{
 	char vcodec[] = "RV24";
 	char acodec[] = "s16l";
 
 	mlt_properties p = MLT_PRODUCER_PROPERTIES( self->parent );
+
+	// We use properties to make sure VLC has consistent data through its runtime
+	// (if we used producer's profile someone could have changed it during VLC
+	// runtime which would cause VLC to have incorrect data during frame rendering)
+	mlt_properties_set_double( p, "_fps", mlt_profile_fps( profile ) );
+	mlt_properties_set_int( p, "_width", profile->width );
+	mlt_properties_set_int( p, "_height", profile->height );
+	mlt_properties_set_int( p, "_channels", mlt_properties_get_int( p, "channels" ) );
+	mlt_properties_set_int( p, "_samplerate", mlt_properties_get_int( p, "samplerate" ) );
 
 	// Build smem options string
 	char smem_options[ 1000 ];
@@ -349,12 +359,12 @@ static void setup_smem( producer_libvlc self )
 			 "video-data=%" PRIdPTR ","
 			 "}",
 			 vcodec,
-			 mlt_properties_get( p, "fps" ),
-			 mlt_properties_get_int( p, "width" ),
-			 mlt_properties_get_int( p, "height" ),
+			 mlt_properties_get( p, "_fps" ),
+			 mlt_properties_get_int( p, "_width" ),
+			 mlt_properties_get_int( p, "_height" ),
 			 acodec,
-			 mlt_properties_get_int( p, "channels" ),
-			 mlt_properties_get_int( p, "samplerate" ),
+			 mlt_properties_get_int( p, "_channels" ),
+			 mlt_properties_get_int( p, "_samplerate" ),
 			 (intptr_t)(void*)&audio_prerender_callback,
 			 (intptr_t)(void*)&audio_postrender_callback,
 			 (intptr_t)(void*)&video_prerender_callback,
@@ -364,6 +374,8 @@ static void setup_smem( producer_libvlc self )
 
 	// Supply smem options to libVLC
 	libvlc_media_add_option( self->media, smem_options );
+
+	return 0;
 }
 
 static void audio_prerender_callback( void* p_audio_data, uint8_t** pp_pcm_buffer, size_t size )
@@ -417,7 +429,7 @@ static void audio_postrender_callback( void* p_audio_data, uint8_t* p_pcm_buffer
 
 	mlt_properties properties = MLT_PRODUCER_PROPERTIES( self->parent );
 
-	double fps = mlt_properties_get_double( properties, "fps" );
+	double fps = mlt_properties_get_double( properties, "_fps" );
 
 	// This is how many samples per channel we need for the current audio frame
 	int needed_samples = mlt_sample_calculator( fps, rate, self->current_audio_frame );
@@ -561,8 +573,8 @@ static void video_postrender_callback( void *data, uint8_t *buffer, int width, i
 	// of returned buffer, accessing last bytes causes segfault),
 	// so we're using width and height that we've inputted into
 	// transcoder when constructing smem
-	width = mlt_properties_get_int( properties, "width" );
-	height = mlt_properties_get_int( properties, "height" );
+	width = mlt_properties_get_int( properties, "_width" );
+	height = mlt_properties_get_int( properties, "_height" );
 	size_t buffer_size = width * height * bpp / 8;
 
 	// Allocate space for cache data
