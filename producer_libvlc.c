@@ -9,42 +9,12 @@
 #include <assert.h>
 #include <locale.h>
 
-#define MAX_CACHE_SIZE 500
-#define AUDIO_SAMPLE_SIZE sizeof( int16_t )
+#include "frame_cache.h"
+#include "buffer_queue.h"
 
-// To the reviewer:
-// Assertions in code will be deleted later,
-// these are here to assure that I have proper
-// understanding of libVLC (and should be reviewed as well).
+#define SEEK_THRESHOLD 25
 
 typedef struct producer_libvlc_s *producer_libvlc;
-typedef struct a_cache_item_s *a_cache_item;
-typedef struct v_cache_item_s *v_cache_item;
-
-// Video cache item
-struct v_cache_item_s
-{
-	uint8_t *buffer;
-	size_t size;
-	int bpp;
-	int width;
-	int height;
-};
-
-// Audio cache item
-struct a_cache_item_s
-{
-	// buffer of samples
-	void *buffer;
-	// number of samples per channel
-	size_t samples;
-	// number of channels
-	int channels;
-	// sample rate
-	int sample_rate;
-	// bits per sample
-	int bps;
-};
 
 struct producer_libvlc_s
 {
@@ -52,26 +22,21 @@ struct producer_libvlc_s
 	libvlc_instance_t *vlc;
 	libvlc_media_t *media;
 	libvlc_media_player_t *media_player;
-	mlt_deque v_cache;
-	int v_cache_producers;
-	int v_cache_consumers;
-	pthread_mutex_t v_cache_mutex;
-	pthread_cond_t v_cache_producer_cond;
-	pthread_cond_t v_cache_consumer_cond;
-	mlt_deque a_cache;
-	mlt_position last_frame_requested;
-	int a_cache_producers;
-	int a_cache_consumers;
-	pthread_mutex_t a_cache_mutex;
-	pthread_cond_t a_cache_producer_cond;
-	pthread_cond_t a_cache_consumer_cond;
-	// temporary audio buffer for samples
-	void *ta_buffer;
-	// size of ta_buffer
-	size_t ta_buffer_size;
-	mlt_position current_audio_frame;
+
 	// Flag for cleanup
 	int terminating;
+
+	buffer_queue bqueue;
+	frame_cache cache;
+	pthread_mutex_t cache_mutex;
+	pthread_cond_t cache_cond;
+	int64_t seek_request_timestamp;
+	mlt_position seek_request_position;
+	int during_seek;
+	mlt_position smem_position;
+
+	// This is for holding VLC buffer metadata while it's running
+	unsigned int channels;
 };
 
 static void log_cb( void *data, int vlc_level, const libvlc_log_t *ctx, const char *fmt, va_list args )
@@ -128,6 +93,7 @@ static void video_postrender_callback( void *data, uint8_t *buffer, int width, i
 									   int bpp, size_t size, int64_t pts );
 static int setup_vlc( producer_libvlc self );
 static void cleanup_vlc( producer_libvlc self );
+static void smem_pack_frames_or_block( producer_libvlc self );
 
 mlt_producer producer_libvlc_init( mlt_profile profile, mlt_service_type type, const char *id, char *file )
 {
@@ -162,6 +128,7 @@ mlt_producer producer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 	mlt_properties_set( MLT_PRODUCER_PROPERTIES( producer ), "resource", file );
 	mlt_properties_set_data( MLT_PRODUCER_PROPERTIES( producer ), "_profile", profile, 0, NULL, NULL );
 	mlt_properties_set_double( MLT_PRODUCER_PROPERTIES( producer ), "aspect_ratio", mlt_profile_sar( profile ) );
+	mlt_properties_set_int( MLT_PRODUCER_PROPERTIES( producer ), "frame_cache_size", 25 );
 	// This is needed because VLC uses dot as floating point separator
 	mlt_properties_set_lcnumeric( MLT_PRODUCER_PROPERTIES( producer ), "C" );
 	// Default audio settings
@@ -177,16 +144,9 @@ mlt_producer producer_libvlc_init( mlt_profile profile, mlt_service_type type, c
 	// Override virtual function for getting frames
 	producer->get_frame = producer_get_frame;
 
-	// Initialize cache and its mutexes
-	self->v_cache = mlt_deque_init( );
-	self->a_cache = mlt_deque_init( );
-
-	pthread_mutex_init( &self->v_cache_mutex, NULL );
-	pthread_cond_init( &self->v_cache_producer_cond, NULL );
-	pthread_cond_init( &self->v_cache_consumer_cond, NULL );
-	pthread_mutex_init( &self->a_cache_mutex, NULL );
-	pthread_cond_init( &self->a_cache_producer_cond, NULL );
-	pthread_cond_init( &self->a_cache_consumer_cond, NULL );
+	// Initialize mutexes and conds
+	pthread_mutex_init( &self->cache_mutex, NULL );
+	pthread_cond_init( &self->cache_cond, NULL );
 
 	// Initialize all neded VLC objects (or cleanup on fail)
 	if ( setup_vlc( self ) ) goto cleanup;
@@ -239,6 +199,33 @@ static int setup_vlc( producer_libvlc self )
 	libvlc_media_release( self->media );
 	self->media = NULL;
 
+	// Create buffer_queue and frame_cache
+	if ( self->bqueue == NULL )
+	{
+		mlt_image_format vfmt = mlt_properties_get_int( properties, "_mlt_image_format" );
+		mlt_audio_format afmt = mlt_properties_get_int( properties, "_mlt_audio_format" );
+		int channels = mlt_properties_get_int( properties, "_channels" );
+		int samplerate = mlt_properties_get_int( properties, "_frequency" );
+		self->bqueue = buffer_queue_init( MLT_PRODUCER_SERVICE( self->parent ), vfmt, afmt, channels, samplerate );
+		if ( self->bqueue == NULL ) goto cleanup;
+	}
+	else
+	{
+		buffer_queue_purge( self->bqueue );
+	}
+
+	if ( self->cache == NULL )
+	{
+		int frame_cache_size = mlt_properties_get_int( properties, "frame_cache_size" );
+		mlt_properties_set_int( properties, "_frame_cache_size", frame_cache_size );
+		self->cache = frame_cache_init( frame_cache_size );
+		if ( self->cache == NULL ) goto cleanup;
+	}
+	else
+	{
+		frame_cache_purge( self->cache );
+	}
+
 	// Start smem
 	libvlc_media_player_play( self->media_player );
 
@@ -246,6 +233,7 @@ static int setup_vlc( producer_libvlc self )
 	return 0;
 
 cleanup:
+	if ( self->bqueue ) buffer_queue_close( self->bqueue );
 	cleanup_vlc( self );
 	return 1;
 }
@@ -336,7 +324,9 @@ static int setup_smem( producer_libvlc self )
 	mlt_properties_set_int( p, "_width", profile->width );
 	mlt_properties_set_int( p, "_height", profile->height );
 	mlt_properties_set_int( p, "_channels", mlt_properties_get_int( p, "channels" ) );
-	mlt_properties_set_int( p, "_samplerate", mlt_properties_get_int( p, "samplerate" ) );
+	mlt_properties_set_int( p, "_frequency", mlt_properties_get_int( p, "frequency" ) );
+	mlt_properties_set_int( p, "_mlt_audio_format", mlt_audio_s16 );
+	mlt_properties_set_int( p, "_mlt_image_format", mlt_image_rgb24 );
 
 	// Build smem options string
 	char smem_options[ 1000 ];
@@ -364,7 +354,7 @@ static int setup_smem( producer_libvlc self )
 			 mlt_properties_get_int( p, "_height" ),
 			 acodec,
 			 mlt_properties_get_int( p, "_channels" ),
-			 mlt_properties_get_int( p, "_samplerate" ),
+			 mlt_properties_get_int( p, "_frequency" ),
 			 (intptr_t)(void*)&audio_prerender_callback,
 			 (intptr_t)(void*)&audio_postrender_callback,
 			 (intptr_t)(void*)&video_prerender_callback,
@@ -378,44 +368,50 @@ static int setup_smem( producer_libvlc self )
 	return 0;
 }
 
+// WARNING: Lock cache_mutex before calling this function
+static void smem_pack_frames_or_block( producer_libvlc self )
+{
+	mlt_properties properties = MLT_PRODUCER_PROPERTIES( self->parent );
+
+	int cache_size = mlt_properties_get_int( properties, "_frame_cache_size" );
+
+	// mlt_pos - position of frame that will be fetched from the producer next time
+	// smem_pos - position of frame that will be packed into frame_cache next time by smem
+	mlt_position mlt_pos =
+		mlt_producer_position( self->parent );
+
+	mlt_position earliest_frame_pos = frame_cache_earliest_frame_position( self->cache );
+	mlt_position latest_frame_pos = frame_cache_latest_frame_position( self->cache );
+
+	// Block if rendering packing new frame would erase the one we need from cache
+	while ( earliest_frame_pos == mlt_producer_position( self->parent ) && latest_frame_pos - earliest_frame_pos + 1 == cache_size && !self->during_seek )
+	{
+		pthread_cond_wait( &self->cache_cond, &self->cache_mutex );
+	}
+
+	if ( !self->during_seek )
+	{
+		mlt_frame frame = buffer_queue_pack_frame( self->bqueue, self->smem_position );
+		if ( frame != NULL )
+		{
+			self->smem_position++;
+			frame_cache_put_frame( self->cache, frame );
+		}
+	}
+}
+
 static void audio_prerender_callback( void* p_audio_data, uint8_t** pp_pcm_buffer, size_t size )
 {
-	// Flag for termination purposes
-	int mutex_locked = 0;
-
 	producer_libvlc self = p_audio_data;
+
+	mlt_log( MLT_PRODUCER_SERVICE( self->parent ), MLT_LOG_DEBUG, "%s\n", "audio_prerender_callback: start\n" );
 
 	// If we're terminating, we need to abort render
 	if ( self->terminating )
-		goto terminate;
+		*pp_pcm_buffer = NULL;
+	else
+		*pp_pcm_buffer = mlt_pool_alloc( size * sizeof( uint8_t ) );
 
-	// Lock cache mutex
-	pthread_mutex_lock( &self->a_cache_mutex );
-	mutex_locked = 1;
-
-	// Wait for space in cache
-	self->a_cache_producers++;
-	while ( mlt_deque_count( self->a_cache ) == MAX_CACHE_SIZE )
-	{
-		pthread_cond_wait( &self->a_cache_producer_cond, &self->a_cache_mutex );
-
-		// Terminate function could have woken us up
-		if ( self->terminating )
-			goto terminate;
-	}
-	self->a_cache_producers--;
-
-	// Allocate space for buffer and proceed with rendering
-	uint8_t *buffer = mlt_pool_alloc( size * sizeof( uint8_t ) );
-	*pp_pcm_buffer = buffer;
-
-	return;
-
-terminate:
-	*pp_pcm_buffer = NULL;
-	// If we own the mutex, we need to release it for destruction
-	if ( mutex_locked )
-		pthread_mutex_unlock( &self->a_cache_mutex );
 	return;
 }
 
@@ -423,291 +419,128 @@ static void audio_postrender_callback( void* p_audio_data, uint8_t* p_pcm_buffer
 									   unsigned int rate, unsigned int nb_samples, unsigned int bits_per_sample,
 									   size_t size, int64_t pts )
 {
-	assert( ( nb_samples * AUDIO_SAMPLE_SIZE * channels ) <= size );
-
 	producer_libvlc self = p_audio_data;
 
-	mlt_properties properties = MLT_PRODUCER_PROPERTIES( self->parent );
+	mlt_log( MLT_PRODUCER_SERVICE( self->parent ), MLT_LOG_DEBUG, "%s\n", "audio_postrender_callback: start\n" );
 
-	double fps = mlt_properties_get_double( properties, "_fps" );
+	buffer_queue_insert_audio_buffer( self->bqueue, p_pcm_buffer, size );
 
-	// This is how many samples per channel we need for the current audio frame
-	int needed_samples = mlt_sample_calculator( fps, rate, self->current_audio_frame );
-	// Size of a complete single sample is equal to AUDIO_SAMPLE_SIZE * channels
-	int buffered_samples = self->ta_buffer_size / ( AUDIO_SAMPLE_SIZE * channels );
-	// How many samples have we computed
-	int calculated_samples = nb_samples + buffered_samples;
-	// We have all data needed to complete a frame
-	if ( calculated_samples >= needed_samples )
+	pthread_mutex_lock( &self->cache_mutex );
+	// Check if we have seeked already
+	if ( self->during_seek )
 	{
-		size_t samples_to_buffer = calculated_samples - needed_samples;
-		size_t new_ta_buffer_size = samples_to_buffer * AUDIO_SAMPLE_SIZE * channels;
-		size_t frame_samples_size = needed_samples * AUDIO_SAMPLE_SIZE * channels;
-		// Allocate buffer for frame samples
-		uint8_t *frame_samples = mlt_pool_alloc( frame_samples_size * sizeof( uint8_t ) );
-		// And for the new temp audio buffer
-		uint8_t *new_ta_buffer = mlt_pool_alloc( new_ta_buffer_size * sizeof( uint8_t ) );
-		// Copy frame samples to buffer and initialize new temp buffer
-		if ( buffered_samples < needed_samples ) // We need to use both buffers
+		int64_t vlc_timestamp = libvlc_media_player_get_time( self->media_player );
+		if ( vlc_timestamp == self->seek_request_timestamp )
 		{
-			// Copy entire temp audio buffer contents
-			memcpy( frame_samples, self->ta_buffer, self->ta_buffer_size );
-			// Copy samples from pcm buffer that we still need
-			memcpy( frame_samples + self->ta_buffer_size, p_pcm_buffer,
-				( needed_samples - buffered_samples ) * AUDIO_SAMPLE_SIZE * channels );
-			// Copy remaining samples to new temp audio buffer
-			memcpy( new_ta_buffer,
-				p_pcm_buffer + ( needed_samples - buffered_samples ) * AUDIO_SAMPLE_SIZE * channels,
-				new_ta_buffer_size );
-		}
-		else // We need to use samples from temp audio buffer only
-		{
-			// Copy all needed samples from temp audio buffer
-			memcpy( frame_samples, self->ta_buffer, frame_samples_size );
-			// Copy remaining samples from both buffers to new temp buffer
-			memcpy( new_ta_buffer, self->ta_buffer + frame_samples_size,
-				self->ta_buffer_size - frame_samples_size );
-			memcpy( new_ta_buffer + ( self->ta_buffer_size - frame_samples_size ), p_pcm_buffer,
-				nb_samples * AUDIO_SAMPLE_SIZE * channels );
-		}
-
-		// We don't need those buffers anymore
-		mlt_pool_release( self->ta_buffer );
-		mlt_pool_release( p_pcm_buffer );
-
-		// Move our new temp audio buffer to producer
-		self->ta_buffer = new_ta_buffer;
-		self->ta_buffer_size = new_ta_buffer_size;
-
-		// Move samples to cache
-		a_cache_item a_item = calloc( 1, sizeof( struct a_cache_item_s ) );
-		a_item->buffer = frame_samples;
-		a_item->samples = needed_samples;
-		a_item->sample_rate = rate;
-		a_item->channels = channels;
-
-		mlt_deque_push_back( self->a_cache, a_item );
-
-		// We will be computing next frame now
-		self->current_audio_frame++;
-
-		// If there are consumers waiting, signal them
-		if ( self->a_cache_consumers )
-		{
-			pthread_cond_signal( &self->a_cache_consumer_cond );
+			buffer_queue_purge( self->bqueue );
+			frame_cache_purge( self->cache );
+			self->during_seek = 0;
+			self->smem_position = self->seek_request_position;
 		}
 	}
-	// We need to cache the data for later
-	else
-	{
-		// Make temp audio buffer bigger to get all the samples
-		self->ta_buffer =
-			mlt_pool_realloc( self->ta_buffer, self->ta_buffer_size + ( nb_samples * AUDIO_SAMPLE_SIZE * channels ) );
 
-		// TODO: What now? Cleanup and terminate?
-		assert( self->ta_buffer != NULL );
+	// If we're not seeking, we try to pack buffer into frame
+	if ( !self->during_seek )
+		smem_pack_frames_or_block( self );
 
-		memcpy( self->ta_buffer + self->ta_buffer_size,
-				p_pcm_buffer, ( nb_samples * AUDIO_SAMPLE_SIZE * channels ) );
-		self->ta_buffer_size += ( nb_samples * AUDIO_SAMPLE_SIZE * channels );
-		mlt_pool_release( p_pcm_buffer );
-	}
-	pthread_mutex_unlock( &self->a_cache_mutex );
+	// Broadcast to MLT, because frame_cache may now have the frame it's requesting for
+	pthread_cond_broadcast( &self->cache_cond );
+
+	pthread_mutex_unlock( &self->cache_mutex );
 }
 
 static void video_prerender_callback( void *data, uint8_t **p_buffer, size_t size )
 {
-	// Flag for termination purposes
-	int mutex_locked = 0;
-
 	producer_libvlc self = data;
+
+	mlt_log( MLT_PRODUCER_SERVICE( self->parent ), MLT_LOG_DEBUG, "%s\n", "video_prerender_callback: start\n" );
 
 	// If we're terminating, we need to abort render
 	if ( self->terminating )
-		goto terminate;
+		*p_buffer = NULL;
+	else
+		*p_buffer = mlt_pool_alloc( size * sizeof( uint8_t ) );
 
-	// Aquire cache mutex
-	pthread_mutex_lock( &self->v_cache_mutex );
-	mutex_locked = 1;
-
-	// Inform all threads we are waiting on cond
-	self->v_cache_producers++;
-
-	// Wait until there is free space in cache
-	while( mlt_deque_count( self->v_cache ) == MAX_CACHE_SIZE )
-	{
-		pthread_cond_wait( &self->v_cache_producer_cond, &self->v_cache_mutex );
-
-		// Terminate function could have woken us up
-		if ( self->terminating )
-			goto terminate;
-	}
-
-	// We're not waiting on cond anymore
-	self->v_cache_producers--;
-
-	// Allocate memory and proceed with rendering
-	uint8_t *buffer = mlt_pool_alloc( size * sizeof( uint8_t ) );
-	*p_buffer = buffer;
-
-	return;
-
-terminate:
-	*p_buffer = NULL;
-	// Release mutex for destruction
-	if ( mutex_locked )
-		pthread_mutex_unlock( &self->v_cache_mutex );
 	return;
 }
 
 static void video_postrender_callback( void *data, uint8_t *buffer, int width, int height,
 									   int bpp, size_t size, int64_t pts )
 {
-	size_t i;
-
 	producer_libvlc self = data;
-	mlt_properties properties = MLT_PRODUCER_PROPERTIES( self->parent );
 
-	// For some reason width and height returned by smem
-	// seems bogus (when using width * height * bpp / 8 as size
-	// of returned buffer, accessing last bytes causes segfault),
-	// so we're using width and height that we've inputted into
-	// transcoder when constructing smem
-	width = mlt_properties_get_int( properties, "_width" );
-	height = mlt_properties_get_int( properties, "_height" );
-	size_t buffer_size = width * height * bpp / 8;
+	mlt_log( MLT_PRODUCER_SERVICE( self->parent ), MLT_LOG_DEBUG, "%s\n", "video_postrender_callback: start\n" );
 
-	// Allocate space for cache data
-	v_cache_item v_item = calloc( 1, sizeof( struct v_cache_item_s ) );
+	buffer_queue_insert_video_buffer( self->bqueue, buffer, size );
 
-	// Move stuff to cache
-	v_item->buffer = buffer;
-	v_item->size = size;
-	v_item->bpp = bpp;
-	v_item->width = width;
-	v_item->height = height;
-
-	// Push cache item into cache
-	mlt_deque_push_back( self->v_cache, v_item );
-
-	// Signal waiting consumers, if any
-	if ( self->v_cache_consumers )
+	pthread_mutex_lock( &self->cache_mutex );
+	// Check if we have seeked already
+	if ( self->during_seek )
 	{
-		pthread_cond_signal( &self->v_cache_consumer_cond );
+		int64_t vlc_timestamp = libvlc_media_player_get_time( self->media_player );
+		if ( vlc_timestamp == self->seek_request_timestamp )
+		{
+			buffer_queue_purge( self->bqueue );
+			frame_cache_purge( self->cache );
+			self->during_seek = 0;
+			self->smem_position = self->seek_request_position;
+		}
 	}
 
-	// Unlock cache access
-	pthread_mutex_unlock( &self->v_cache_mutex );
+	// If we're not seeking, we try to pack buffer into frame
+	if ( !self->during_seek )
+		smem_pack_frames_or_block( self );
+
+	// Broadcast to MLT, because frame_cache may now have the frame it's requesting for
+	pthread_cond_broadcast( &self->cache_cond );
+
+	pthread_mutex_unlock( &self->cache_mutex );
 }
 
-static int producer_get_audio( mlt_frame frame, void **buffer, mlt_audio_format *format, int *frequency, int *channels, int *samples )
-{
-	// Get the producer
-	producer_libvlc self = mlt_frame_pop_audio( frame );
-
-	pthread_mutex_lock( &self->a_cache_mutex );
-	self->a_cache_consumers++;
-	// TODO: This logic will have to be rewritten when we implement seeking,
-	// if we manipulate the video's position, we have no guarantee that
-	// data in cache is actually relevant to us (same for video)
-	while ( mlt_deque_count( self->a_cache ) == 0 ) {
-		pthread_cond_wait( &self->a_cache_consumer_cond, &self->a_cache_mutex );
-	}
-	self->a_cache_consumers--;
-
-	a_cache_item a_item = mlt_deque_pop_front( self->a_cache );
-	*buffer = a_item->buffer;
-	// We set libVLC's smem to use this format
-	*format = mlt_audio_s16;
-	*frequency = a_item->sample_rate;
-	*channels = a_item->channels;
-	*samples = a_item->samples;
-
-	free( a_item );
-
-	// Sets audio buffer destructor
-	mlt_frame_set_audio( frame, *buffer, *format, *samples * *channels * AUDIO_SAMPLE_SIZE, mlt_pool_release );
-
-	if ( self->a_cache_producers )
-	{
-		pthread_cond_signal( &self->a_cache_producer_cond );
-	}
-	pthread_mutex_unlock( &self->a_cache_mutex );
-	return 0;
-}
-
-static int producer_get_image( mlt_frame frame, uint8_t **buffer, mlt_image_format *format, int *width, int *height, int writable )
-{
-	// Get the producer
-	producer_libvlc self = mlt_frame_pop_service( frame );
-
-	mlt_producer producer = self->parent;
-
-	// libVLC produces frames in this format
-	*format = mlt_image_rgb24;
-
-	// Lock the cache mutex
-	pthread_mutex_lock( &self->v_cache_mutex );
-
-	// Inform other threads that you're waiting for data
-	self->v_cache_consumers++;
-
-	// Wait for data
-	while ( mlt_deque_count( self->v_cache ) == 0 )
-	{
-		pthread_cond_wait( &self->v_cache_consumer_cond, &self->v_cache_mutex );
-	}
-
-	// Not waiting for data anymore
-	self->v_cache_consumers--;
-
-	// Get data, rewrite it, and free cache item
-	v_cache_item v_item = mlt_deque_pop_front( self->v_cache );
-	*width = v_item->width;
-	*height = v_item->height;
-	*buffer = v_item->buffer;
-	free( v_item );
-
-	// Sets image buffer destructor
-	mlt_frame_set_image( frame, *buffer, *width * *height * 3, mlt_pool_release );
-
-	// Signal waiting producers, if any
-	if ( self->v_cache_producers )
-	{
-		pthread_cond_signal( &self->v_cache_producer_cond );
-	}
-
-	// We're finished with cache
-	pthread_mutex_unlock( &self->v_cache_mutex );
-
-	return 0;
-}
-
-static int producer_get_frame( mlt_producer producer, mlt_frame_ptr frame, int index )
+static int producer_get_frame( mlt_producer producer, mlt_frame_ptr frame_ptr, int index )
 {
 	// Get handle to libVLC's producer
 	producer_libvlc self = producer->child;
 
+	pthread_mutex_lock( &self->cache_mutex );
+
 	// Aquire current position
 	mlt_position current_position = mlt_producer_position( producer );
+	double fps = mlt_properties_get_double( MLT_PRODUCER_PROPERTIES( producer ), "_fps" );
 
-	// Access the private data (producer is needed to get profile)
-	mlt_service service = MLT_PRODUCER_SERVICE( producer );
+	mlt_position earliest_frame_pos =
+		frame_cache_earliest_frame_position( self->cache );
+	mlt_position latest_frame_pos =
+		frame_cache_latest_frame_position( self->cache );
 
-	// Initialize frame with producer's profile and get its properties
-	*frame = mlt_frame_init( service );
-	mlt_properties frame_properties = mlt_frame_properties( *frame );
+	// Seek and wait for seek if needed
+	if ( earliest_frame_pos > current_position || latest_frame_pos - current_position > SEEK_THRESHOLD )
+	{
+		mlt_log( MLT_PRODUCER_SERVICE( self->parent ), MLT_LOG_DEBUG, "%s\n", "producer_get_frame: Seeking\n" );
+		self->during_seek = 1;
+		self->seek_request_position = current_position;
+		self->seek_request_timestamp = 1000.0 * current_position / fps + 0.5;
+		libvlc_media_player_set_time( self->media_player, self->seek_request_timestamp );
+		while ( self->during_seek )
+		{
+			pthread_cond_broadcast( &self->cache_cond );
+			pthread_cond_wait( &self->cache_cond, &self->cache_mutex );
+		}
+	}
 
-	// Push get_image and its argument to video stack of frame
-	mlt_frame_push_service( *frame, self );
-	mlt_frame_push_get_image( *frame, producer_get_image );
+	mlt_frame frame = NULL;
+	while ( !( frame = frame_cache_get_frame( self->cache, current_position ) ) )
+	{
+		pthread_cond_wait( &self->cache_cond, &self->cache_mutex );
+	}
 
-	mlt_frame_push_audio( *frame, self );
-	mlt_frame_push_audio( *frame, producer_get_audio );
+	*frame_ptr = frame;
 
 	// Prepare next frame
 	mlt_producer_prepare_next( producer );
 
+	pthread_cond_broadcast( &self->cache_cond );
+	pthread_mutex_unlock( &self->cache_mutex );
 	return 0;
 }
 
@@ -717,7 +550,10 @@ static void producer_close( mlt_producer parent )
 		producer_libvlc self = parent->child;
 
 		// Stop smem threads
+		pthread_mutex_lock( &self->cache_mutex );
 		self->terminating = 1;
+		pthread_cond_broadcast( &self->cache_cond );
+		pthread_mutex_unlock( &self->cache_mutex );
 		libvlc_media_player_stop( self->media_player );
 
 		// Release libVLC objects
@@ -725,30 +561,9 @@ static void producer_close( mlt_producer parent )
 		libvlc_media_release( self->media );
 		libvlc_release( self->vlc );
 
-		// Clear video cache
-		v_cache_item v_item;
-		while ( v_item = mlt_deque_pop_front( self->v_cache ) ) {
-			mlt_pool_release( v_item->buffer );
-			free( v_item );
-		}
-
-		// Clear audio cache
-		a_cache_item a_item;
-		while ( a_item = mlt_deque_pop_front( self->a_cache ) ) {
-			mlt_pool_release( a_item->buffer );
-			free( a_item );
-		}
-
-		// Clear ta_buffer
-		mlt_pool_release( self->ta_buffer );
-
 		// Clear mutexes and conds
-		pthread_mutex_destroy( &self->v_cache_mutex );
-		pthread_cond_destroy( &self->v_cache_producer_cond );
-		pthread_cond_destroy( &self->v_cache_consumer_cond );
-		pthread_mutex_destroy( &self->a_cache_mutex );
-		pthread_cond_destroy( &self->a_cache_producer_cond );
-		pthread_cond_destroy( &self->a_cache_consumer_cond );
+		pthread_mutex_destroy( &self->cache_mutex );
+		pthread_cond_destroy( &self->cache_cond );
 
 		// Free allocated memory for libvlc_producer
 		free( self );
