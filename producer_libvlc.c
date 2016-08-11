@@ -430,6 +430,7 @@ static void audio_postrender_callback( void* p_audio_data, uint8_t* p_pcm_buffer
 	if ( self->during_seek )
 	{
 		int64_t vlc_timestamp = libvlc_media_player_get_time( self->media_player );
+		mlt_log( MLT_PRODUCER_SERVICE( self->parent ), MLT_LOG_DEBUG, "%s\n", "audio_postrender_callback: now seeking. Current timestamp %" PRId64 "\n", vlc_timestamp );
 		if ( vlc_timestamp == self->seek_request_timestamp )
 		{
 			buffer_queue_purge( self->bqueue );
@@ -478,6 +479,7 @@ static void video_postrender_callback( void *data, uint8_t *buffer, int width, i
 	if ( self->during_seek )
 	{
 		int64_t vlc_timestamp = libvlc_media_player_get_time( self->media_player );
+		mlt_log( MLT_PRODUCER_SERVICE( self->parent ), MLT_LOG_DEBUG, "%s\n", "video_postrender_callback: now seeking. Current timestamp %" PRId64 "\n", vlc_timestamp );
 		if ( vlc_timestamp == self->seek_request_timestamp )
 		{
 			buffer_queue_purge( self->bqueue );
@@ -514,12 +516,13 @@ static int producer_get_frame( mlt_producer producer, mlt_frame_ptr frame_ptr, i
 		frame_cache_latest_frame_position( self->cache );
 
 	// Seek and wait for seek if needed
-	if ( earliest_frame_pos > current_position || latest_frame_pos - current_position > SEEK_THRESHOLD )
+	if ( earliest_frame_pos > current_position || current_position - latest_frame_pos > SEEK_THRESHOLD )
 	{
-		mlt_log( MLT_PRODUCER_SERVICE( self->parent ), MLT_LOG_DEBUG, "%s\n", "producer_get_frame: Seeking\n" );
+		mlt_log( MLT_PRODUCER_SERVICE( self->parent ), MLT_LOG_DEBUG, "%s\n", "producer_get_frame: Seeking to pos %d\n", current_position );
 		self->during_seek = 1;
 		self->seek_request_position = current_position;
 		self->seek_request_timestamp = 1000.0 * current_position / fps + 0.5;
+		mlt_log( MLT_PRODUCER_SERVICE( self->parent ), MLT_LOG_DEBUG, "%s\n", "producer_get_frame: Requested timestamp is %" PRId64 "\n", self->seek_request_timestamp );
 		libvlc_media_player_set_time( self->media_player, self->seek_request_timestamp );
 		while ( self->during_seek )
 		{
