@@ -1,6 +1,0 @@
-This directory contain demos of several
-libVLC solutions contained in producer/consumer.
-
-To compile demos, just link them against libVLC.
-
-This is part of my code's documentation.
