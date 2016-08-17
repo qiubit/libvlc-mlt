@@ -1,0 +1,22 @@
+schema_version: 0.1
+type: producer
+identifier: libvlc
+title: libVLC
+version: 1
+creator: Pawel Golinski
+license: LGPL
+language: en
+tags:
+  - Audio
+  - Video
+description: >
+  libVLC video and audio input module. It uses VLC smem module.
+bugs:
+  - Seeking doesn't work as it should (audio/video desync).
+parameters:
+  - identifier: resource
+    argument: yes
+    title: File/URL
+    type: string
+    description: Input file
+    required: yes
