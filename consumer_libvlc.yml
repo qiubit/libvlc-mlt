@@ -4,7 +4,7 @@ identifier: libvlc
 title: libVLC
 version: 1
 creator: Pawel Golinski
-license: LGPL
+license: GPL
 language: en
 tags:
   - Audio
