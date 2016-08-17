@@ -1,0 +1,13 @@
+libvlc-mlt readme
+-----------------
+	Written by Pawel Golinski <golpaw1@gmail.com>
+
+	libVLC producer and consumer plugins to MLT. All files
+	should be put into src/modules/libvlc directory (in MLT)
+	before compiling MLT.
+
+TODOs
+-----
+
+	Seeking needs to be fixed in producer
+
